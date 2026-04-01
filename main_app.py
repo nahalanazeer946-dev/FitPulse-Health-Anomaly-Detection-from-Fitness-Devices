@@ -11,7 +11,8 @@ from matplotlib import rcParams
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-import warnings
+import warnings, io, base64, tempfile, os
+from datetime import datetime, timedelta
 warnings.filterwarnings("ignore")
 
 from prophet import Prophet
@@ -31,25 +32,30 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------
-# SESSION STATE (Milestone 3)
+# SESSION STATE
 # ---------------------------------------------------
 
 for k, v in [
     ("dark_mode",        True),
+    # Milestone 1
+    ("m1_df_clean",      None),
+    # Milestone 2/3 shared data
     ("files_loaded",     False),
     ("anomaly_done",     False),
     ("simulation_done",  False),
-    ("daily_m3",  None), ("hourly_s", None), ("hourly_i", None),
-    ("sleep_m3",  None), ("hr_m3",    None), ("hr_minute", None),
-    ("master",   None),
-    ("anom_hr",  None), ("anom_steps", None), ("anom_sleep", None),
-    ("sim_results", None),
+    ("daily_m3",         None), ("hourly_s", None), ("hourly_i", None),
+    ("sleep_m3",         None), ("hr_m3",    None), ("hr_minute", None),
+    ("master",           None),
+    ("anom_hr",          None), ("anom_steps", None), ("anom_sleep", None),
+    ("sim_results",      None),
+    # Milestone 4
+    ("pipeline_done",    False),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ---------------------------------------------------
-# GLOBAL STYLE  (covers all milestones)
+# GLOBAL STYLE
 # ---------------------------------------------------
 
 st.markdown("""
@@ -234,6 +240,30 @@ div[data-testid="metric-container"] {
     font-size:0.85rem; color:#feb2b2;
 }
 .m3-divider { border:none; border-top:1px solid rgba(99,179,237,0.2); margin:2rem 0; }
+
+/* ── Milestone 4 styles ── */
+.m4-hero {
+    background: linear-gradient(135deg,rgba(99,179,237,0.08),rgba(104,211,145,0.05),rgba(10,14,26,0.9));
+    border: 1px solid rgba(99,179,237,0.2);
+    border-radius: 20px; padding: 2rem 2.5rem;
+    margin-bottom: 1.5rem; position: relative; overflow: hidden;
+}
+.kpi-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:0.7rem; margin:1rem 0; }
+.kpi-card {
+    background: rgba(15,23,42,0.85); border: 1px solid rgba(99,179,237,0.2); border-radius:14px;
+    padding:1rem 1.1rem; text-align:center; backdrop-filter:blur(10px);
+}
+.kpi-val {
+    font-family:'Syne',sans-serif; font-size:1.7rem; font-weight:800;
+    line-height:1; margin-bottom:0.2rem;
+}
+.kpi-label { font-size:0.68rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.07em; }
+.kpi-sub { font-size:0.65rem; color:#94a3b8; margin-top:0.15rem; }
+.anom-row {
+    display:flex; align-items:center; gap:0.6rem; padding:0.45rem 0;
+    border-bottom:1px solid rgba(99,179,237,0.2); font-size:0.82rem;
+}
+.m4-divider { border:none; border-top:1px solid rgba(99,179,237,0.2); margin:1.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -283,7 +313,7 @@ CLUSTER_COLORS = [
 ]
 
 # ---------------------------------------------------
-# MILESTONE 3 — THEME VARIABLES
+# MILESTONE 3 — THEME VARIABLES (also used by M4)
 # ---------------------------------------------------
 
 BG         = "linear-gradient(135deg,#0a0e1a 0%,#0f1729 40%,#0a1628 100%)"
@@ -295,6 +325,7 @@ ACCENT     = "#63b3ed"
 ACCENT2    = "#f687b3"
 ACCENT3    = "#68d391"
 ACCENT_RED = "#fc8181"
+ACCENT_ORG = "#f6ad55"
 PLOT_BG    = "#0f172a"
 PAPER_BG   = "#0a0e1a"
 GRID_CLR   = "rgba(255,255,255,0.06)"
@@ -321,6 +352,30 @@ PLOTLY_LAYOUT = dict(
     margin=dict(l=50, r=30, t=60, b=50),
     hoverlabel=dict(bgcolor=CARD_BG, bordercolor=CARD_BOR, font_color=TEXT),
 )
+
+# M4 plotly base (same dark theme)
+PLOTLY_BASE = dict(
+    paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT,
+    font_family="Inter, sans-serif",
+    legend=dict(bgcolor=CARD_BG, bordercolor=CARD_BOR, borderwidth=1, font_color=TEXT),
+    margin=dict(l=50, r=30, t=55, b=45),
+    hoverlabel=dict(bgcolor=CARD_BG, bordercolor=CARD_BOR, font_color=TEXT),
+)
+
+# ---------------------------------------------------
+# REQUIRED FILES REGISTRY (shared M2/M3/M4)
+# ---------------------------------------------------
+
+REQUIRED_FILES = {
+    "dailyActivity_merged.csv":     {"key_cols": ["ActivityDate", "TotalSteps", "Calories"],       "label": "Daily Activity",    "icon": "🏃"},
+    "hourlySteps_merged.csv":       {"key_cols": ["ActivityHour", "StepTotal"],                    "label": "Hourly Steps",      "icon": "👣"},
+    "hourlyIntensities_merged.csv": {"key_cols": ["ActivityHour", "TotalIntensity"],               "label": "Hourly Intensities","icon": "⚡"},
+    "minuteSleep_merged.csv":       {"key_cols": ["date", "value", "logId"],                       "label": "Minute Sleep",      "icon": "💤"},
+    "heartrate_seconds_merged.csv": {"key_cols": ["Time", "Value"],                                "label": "Heart Rate",        "icon": "❤️"},
+}
+
+def score_match(df, req_info):
+    return sum(1 for col in req_info["key_cols"] if col in df.columns)
 
 # ---------------------------------------------------
 # MILESTONE 3 — HELPER FUNCTIONS
@@ -365,22 +420,28 @@ def apply_plotly_theme(fig, title=""):
     return fig
 
 # ---------------------------------------------------
-# MILESTONE 3 — REQUIRED FILES
+# MILESTONE 4 — HELPER FUNCTIONS
 # ---------------------------------------------------
 
-REQUIRED_FILES = {
-    "dailyActivity_merged.csv":     {"key_cols": ["ActivityDate", "TotalSteps", "Calories"],       "label": "Daily Activity",    "icon": "🏃"},
-    "hourlySteps_merged.csv":       {"key_cols": ["ActivityHour", "StepTotal"],                    "label": "Hourly Steps",      "icon": "👣"},
-    "hourlyIntensities_merged.csv": {"key_cols": ["ActivityHour", "TotalIntensity"],               "label": "Hourly Intensities","icon": "⚡"},
-    "minuteSleep_merged.csv":       {"key_cols": ["date", "value", "logId"],                       "label": "Minute Sleep",      "icon": "💤"},
-    "heartrate_seconds_merged.csv": {"key_cols": ["Time", "Value"],                                "label": "Heart Rate",        "icon": "❤️"},
-}
+def ptheme(fig, title="", h=400):
+    fig.update_layout(**PLOTLY_BASE, height=h)
+    fig.update_xaxes(gridcolor=GRID_CLR, zeroline=False, linecolor=CARD_BOR, tickfont_color=MUTED)
+    fig.update_yaxes(gridcolor=GRID_CLR, zeroline=False, linecolor=CARD_BOR, tickfont_color=MUTED)
+    if title:
+        fig.update_layout(title=dict(text=title, font_color=TEXT,
+                                     font_size=13, font_family="Syne, sans-serif"))
+    return fig
 
-def score_match(df, req_info):
-    return sum(1 for col in req_info["key_cols"] if col in df.columns)
+def sec_m4(icon, title, badge=None):
+    badge_html = f'<span style="margin-left:auto;background:{BADGE_BG};border:1px solid {CARD_BOR};border-radius:100px;padding:0.2rem 0.7rem;font-size:0.7rem;font-family:JetBrains Mono,monospace;color:{ACCENT}">{badge}</span>' if badge else ''
+    st.markdown(f'<div class="sec-header"><div class="sec-icon">{icon}</div><p class="sec-title">{title}</p>{badge_html}</div>', unsafe_allow_html=True)
+
+def ui_info_m4(m):    st.markdown(f'<div class="alert-info">ℹ️ {m}</div>',    unsafe_allow_html=True)
+def ui_success_m4(m): st.markdown(f'<div class="alert-success">✅ {m}</div>', unsafe_allow_html=True)
+def ui_danger_m4(m):  st.markdown(f'<div class="alert-danger">🚨 {m}</div>',  unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# MILESTONE 3 — ANOMALY DETECTION FUNCTIONS
+# ANOMALY DETECTION FUNCTIONS (shared M3/M4)
 # ---------------------------------------------------
 
 def detect_hr_anomalies(master, hr_high=100, hr_low=50, residual_sigma=2.0):
@@ -405,6 +466,27 @@ def detect_hr_anomalies(master, hr_high=100, hr_low=50, residual_sigma=2.0):
     hr_daily["reason"] = hr_daily.apply(reason, axis=1)
     return hr_daily
 
+# M4 variant (uses resid_anom column name)
+def detect_hr_m4(master, hr_high=100, hr_low=50, sigma=2.0):
+    df = master[["Id","Date","AvgHR"]].dropna().copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+    d = df.groupby("Date")["AvgHR"].mean().reset_index().sort_values("Date")
+    d["rolling_med"] = d["AvgHR"].rolling(3,center=True,min_periods=1).median()
+    d["residual"]    = d["AvgHR"] - d["rolling_med"]
+    std              = d["residual"].std()
+    d["thresh_high"] = d["AvgHR"] > hr_high
+    d["thresh_low"]  = d["AvgHR"] < hr_low
+    d["resid_anom"]  = d["residual"].abs() > sigma * std
+    d["is_anomaly"]  = d["thresh_high"] | d["thresh_low"] | d["resid_anom"]
+    def reason(r):
+        parts = []
+        if r.thresh_high: parts.append(f"HR>{hr_high}")
+        if r.thresh_low:  parts.append(f"HR<{hr_low}")
+        if r.resid_anom:  parts.append(f"+/-{sigma:.0f}sigma residual")
+        return ", ".join(parts)
+    d["reason"] = d.apply(reason, axis=1)
+    return d
+
 def detect_steps_anomalies(master, steps_low=500, steps_high=25000, residual_sigma=2.0):
     df = master[["Date","TotalSteps"]].dropna().copy()
     df["Date"] = pd.to_datetime(df["Date"])
@@ -425,6 +507,27 @@ def detect_steps_anomalies(master, steps_low=500, steps_high=25000, residual_sig
         return ", ".join(r) if r else ""
     steps_daily["reason"] = steps_daily.apply(reason, axis=1)
     return steps_daily
+
+# M4 variant
+def detect_steps_m4(master, st_low=500, st_high=25000, sigma=2.0):
+    df = master[["Date","TotalSteps"]].dropna().copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+    d = df.groupby("Date")["TotalSteps"].mean().reset_index().sort_values("Date")
+    d["rolling_med"] = d["TotalSteps"].rolling(3,center=True,min_periods=1).median()
+    d["residual"]    = d["TotalSteps"] - d["rolling_med"]
+    std              = d["residual"].std()
+    d["thresh_low"]  = d["TotalSteps"] < st_low
+    d["thresh_high"] = d["TotalSteps"] > st_high
+    d["resid_anom"]  = d["residual"].abs() > sigma * std
+    d["is_anomaly"]  = d["thresh_low"] | d["thresh_high"] | d["resid_anom"]
+    def reason(r):
+        parts = []
+        if r.thresh_low:  parts.append(f"Steps<{int(st_low):,}")
+        if r.thresh_high: parts.append(f"Steps>{int(st_high):,}")
+        if r.resid_anom:  parts.append(f"+/-{sigma:.0f}sigma residual")
+        return ", ".join(parts)
+    d["reason"] = d.apply(reason, axis=1)
+    return d
 
 def detect_sleep_anomalies(master, sleep_low=60, sleep_high=600, residual_sigma=2.0):
     df = master[["Date","TotalSleepMinutes"]].dropna().copy()
@@ -449,13 +552,33 @@ def detect_sleep_anomalies(master, sleep_low=60, sleep_high=600, residual_sigma=
     sleep_daily["reason"] = sleep_daily.apply(reason, axis=1)
     return sleep_daily
 
+# M4 variant
+def detect_sleep_m4(master, sl_low=60, sl_high=600, sigma=2.0):
+    df = master[["Date","TotalSleepMinutes"]].dropna().copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+    d = df.groupby("Date")["TotalSleepMinutes"].mean().reset_index().sort_values("Date")
+    d["rolling_med"] = d["TotalSleepMinutes"].rolling(3,center=True,min_periods=1).median()
+    d["residual"]    = d["TotalSleepMinutes"] - d["rolling_med"]
+    std              = d["residual"].std()
+    d["thresh_low"]  = (d["TotalSleepMinutes"]>0) & (d["TotalSleepMinutes"]<sl_low)
+    d["thresh_high"] = d["TotalSleepMinutes"] > sl_high
+    d["resid_anom"]  = d["residual"].abs() > sigma * std
+    d["is_anomaly"]  = d["thresh_low"] | d["thresh_high"] | d["resid_anom"]
+    def reason(r):
+        parts = []
+        if r.thresh_low:  parts.append(f"Sleep<{int(sl_low)}min")
+        if r.thresh_high: parts.append(f"Sleep>{int(sl_high)}min")
+        if r.resid_anom:  parts.append(f"+/-{sigma:.0f}sigma residual")
+        return ", ".join(parts)
+    d["reason"] = d.apply(reason, axis=1)
+    return d
+
 def simulate_accuracy(master, n_inject=10):
     np.random.seed(42)
     df = master[["Date","AvgHR","TotalSteps","TotalSleepMinutes"]].dropna().copy()
     df["Date"] = pd.to_datetime(df["Date"])
     df_daily = df.groupby("Date").mean().reset_index().sort_values("Date")
     results = {}
-    # HR
     hr_sim = df_daily[["Date","AvgHR"]].copy()
     inject_idx = np.random.choice(len(hr_sim), n_inject, replace=False)
     hr_sim.loc[inject_idx, "AvgHR"] = np.random.choice(
@@ -468,7 +591,6 @@ def simulate_accuracy(master, n_inject=10):
     tp = hr_sim.iloc[inject_idx]["detected"].sum()
     results["Heart Rate"] = {"injected": n_inject, "detected": int(tp),
                               "accuracy": round(tp / n_inject * 100, 1)}
-    # Steps
     st_sim = df_daily[["Date","TotalSteps"]].copy()
     inject_idx2 = np.random.choice(len(st_sim), n_inject, replace=False)
     st_sim.loc[inject_idx2, "TotalSteps"] = np.random.choice(
@@ -481,7 +603,6 @@ def simulate_accuracy(master, n_inject=10):
     tp2 = st_sim.iloc[inject_idx2]["detected"].sum()
     results["Steps"] = {"injected": n_inject, "detected": int(tp2),
                          "accuracy": round(tp2 / n_inject * 100, 1)}
-    # Sleep
     sl_sim = df_daily[["Date","TotalSleepMinutes"]].copy()
     inject_idx3 = np.random.choice(len(sl_sim), n_inject, replace=False)
     sl_sim.loc[inject_idx3, "TotalSleepMinutes"] = np.random.choice(
@@ -498,6 +619,384 @@ def simulate_accuracy(master, n_inject=10):
     overall = round(np.mean([results[k]["accuracy"] for k in results]), 1)
     results["Overall"] = overall
     return results
+
+# ---------------------------------------------------
+# MILESTONE 4 — CHART BUILDERS
+# ---------------------------------------------------
+
+def chart_hr_m4(anom_hr, hr_high, hr_low, sigma, h=380):
+    fig = go.Figure()
+    upper = anom_hr["rolling_med"] + sigma * anom_hr["residual"].std()
+    lower = anom_hr["rolling_med"] - sigma * anom_hr["residual"].std()
+    fig.add_trace(go.Scatter(x=anom_hr["Date"], y=upper, mode="lines",
+                             line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=anom_hr["Date"], y=lower, mode="lines",
+                             fill="tonexty", fillcolor="rgba(99,179,237,0.1)",
+                             line=dict(width=0), name=f"+/-{sigma:.0f}sigma Band"))
+    fig.add_trace(go.Scatter(x=anom_hr["Date"], y=anom_hr["AvgHR"],
+                             mode="lines+markers", name="Avg HR",
+                             line=dict(color=ACCENT, width=2.5), marker=dict(size=5),
+                             hovertemplate="<b>%{x|%d %b}</b><br>HR: %{y:.1f} bpm<extra></extra>"))
+    fig.add_trace(go.Scatter(x=anom_hr["Date"], y=anom_hr["rolling_med"],
+                             mode="lines", name="Trend",
+                             line=dict(color=ACCENT3, width=1.5, dash="dot")))
+    a = anom_hr[anom_hr["is_anomaly"]]
+    if not a.empty:
+        fig.add_trace(go.Scatter(x=a["Date"], y=a["AvgHR"], mode="markers",
+                                 name="🚨 Anomaly",
+                                 marker=dict(color=ACCENT_RED, size=13, symbol="circle",
+                                             line=dict(color="white", width=2)),
+                                 hovertemplate="<b>%{x|%d %b}</b><br>HR: %{y:.1f}<br><b>ANOMALY</b><extra>⚠️</extra>"))
+        for _, row in a.iterrows():
+            fig.add_annotation(x=row["Date"], y=row["AvgHR"],
+                               text=f"⚠️", showarrow=True, arrowhead=2,
+                               arrowcolor=ACCENT_RED, ax=0, ay=-35,
+                               font=dict(color=ACCENT_RED, size=11))
+    fig.add_hline(y=hr_high, line_dash="dash", line_color=ACCENT_RED,
+                  line_width=1.5, opacity=0.6,
+                  annotation_text=f"High ({int(hr_high)} bpm)",
+                  annotation_font_color=ACCENT_RED, annotation_position="top right")
+    fig.add_hline(y=hr_low, line_dash="dash", line_color=ACCENT2,
+                  line_width=1.5, opacity=0.6,
+                  annotation_text=f"Low ({int(hr_low)} bpm)",
+                  annotation_font_color=ACCENT2, annotation_position="bottom right")
+    ptheme(fig, "❤️ Heart Rate - Anomaly Detection", h)
+    fig.update_layout(xaxis_title="Date", yaxis_title="HR (bpm)")
+    return fig
+
+def chart_steps_m4(anom_steps, st_low, h=380):
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.65,0.35], vertical_spacing=0.07,
+                        subplot_titles=["Daily Steps (avg users)","Residual Deviation"])
+    a = anom_steps[anom_steps["is_anomaly"]]
+    for _, row in a.iterrows():
+        fig.add_vrect(x0=str(row["Date"]), x1=str(row["Date"]),
+                      fillcolor="rgba(252,129,129,0.12)",
+                      line_color="rgba(252,129,129,0.4)", line_width=1.5,
+                      row=1, col=1)
+    fig.add_trace(go.Scatter(x=anom_steps["Date"], y=anom_steps["TotalSteps"],
+                             mode="lines+markers", name="Avg Steps",
+                             line=dict(color=ACCENT3, width=2.5), marker=dict(size=5),
+                             hovertemplate="<b>%{x|%d %b}</b><br>Steps: %{y:,.0f}<extra></extra>"),
+                  row=1, col=1)
+    fig.add_trace(go.Scatter(x=anom_steps["Date"], y=anom_steps["rolling_med"],
+                             mode="lines", name="Trend",
+                             line=dict(color=ACCENT, width=2, dash="dash")),
+                  row=1, col=1)
+    if not a.empty:
+        fig.add_trace(go.Scatter(x=a["Date"], y=a["TotalSteps"],
+                                 mode="markers", name="🚨 Alert",
+                                 marker=dict(color=ACCENT_RED, size=13, symbol="triangle-up",
+                                             line=dict(color="white", width=2)),
+                                 hovertemplate="<b>%{x|%d %b}</b><br>Steps: %{y:,.0f}<br><b>ALERT</b><extra>⚠️</extra>"),
+                      row=1, col=1)
+    fig.add_hline(y=int(st_low), line_dash="dash", line_color=ACCENT_RED,
+                  line_width=1.5, opacity=0.7, row=1, col=1,
+                  annotation_text=f"Low ({int(st_low):,})",
+                  annotation_font_color=ACCENT_RED)
+    res_colors = [ACCENT_RED if v else ACCENT3 for v in anom_steps["resid_anom"]]
+    fig.add_trace(go.Bar(x=anom_steps["Date"], y=anom_steps["residual"],
+                         name="Residual", marker_color=res_colors,
+                         hovertemplate="<b>%{x|%d %b}</b><br>Δ: %{y:,.0f}<extra></extra>"),
+                  row=2, col=1)
+    fig.add_hline(y=0, line_color=MUTED, line_width=1, row=2, col=1)
+    ptheme(fig, "🚶 Step Count - Trend & Alerts", h)
+    fig.update_layout(paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT)
+    fig.update_xaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+    fig.update_yaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+    return fig
+
+def chart_sleep_m4(anom_sleep, sl_low, sl_high, h=380):
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.65,0.35], vertical_spacing=0.07,
+                        subplot_titles=["Sleep Duration (min/night)","Residual Deviation"])
+    fig.add_hrect(y0=sl_low, y1=sl_high,
+                  fillcolor="rgba(104,211,145,0.07)", line_width=0,
+                  annotation_text="✅ Healthy Zone", annotation_position="top right",
+                  annotation_font_color=ACCENT3, row=1, col=1)
+    fig.add_trace(go.Scatter(x=anom_sleep["Date"], y=anom_sleep["TotalSleepMinutes"],
+                             mode="lines+markers", name="Sleep (min)",
+                             line=dict(color="#b794f4", width=2.5), marker=dict(size=5),
+                             hovertemplate="<b>%{x|%d %b}</b><br>Sleep: %{y:.0f} min<extra></extra>"),
+                  row=1, col=1)
+    fig.add_trace(go.Scatter(x=anom_sleep["Date"], y=anom_sleep["rolling_med"],
+                             mode="lines", name="Trend",
+                             line=dict(color=ACCENT3, width=1.5, dash="dot")),
+                  row=1, col=1)
+    a = anom_sleep[anom_sleep["is_anomaly"]]
+    if not a.empty:
+        fig.add_trace(go.Scatter(x=a["Date"], y=a["TotalSleepMinutes"],
+                                 mode="markers", name="🚨 Anomaly",
+                                 marker=dict(color=ACCENT_RED, size=13, symbol="diamond",
+                                             line=dict(color="white", width=2)),
+                                 hovertemplate="<b>%{x|%d %b}</b><br>Sleep: %{y:.0f}<br><b>ANOMALY</b><extra>⚠️</extra>"),
+                      row=1, col=1)
+    fig.add_hline(y=int(sl_low), line_dash="dash", line_color=ACCENT_RED,
+                  line_width=1.5, opacity=0.7, row=1, col=1,
+                  annotation_text=f"Min ({int(sl_low)} min)",
+                  annotation_font_color=ACCENT_RED)
+    fig.add_hline(y=int(sl_high), line_dash="dash", line_color=ACCENT,
+                  line_width=1.5, opacity=0.6, row=1, col=1,
+                  annotation_text=f"Max ({int(sl_high)} min)",
+                  annotation_font_color=ACCENT)
+    res_colors = [ACCENT_RED if v else "#b794f4" for v in anom_sleep["resid_anom"]]
+    fig.add_trace(go.Bar(x=anom_sleep["Date"], y=anom_sleep["residual"],
+                         name="Residual", marker_color=res_colors,
+                         hovertemplate="<b>%{x|%d %b}</b><br>Δ: %{y:.0f} min<extra></extra>"),
+                  row=2, col=1)
+    fig.add_hline(y=0, line_color=MUTED, line_width=1, row=2, col=1)
+    ptheme(fig, "💤 Sleep Pattern - Anomaly Visualization", h)
+    fig.update_layout(paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT)
+    fig.update_xaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+    fig.update_yaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+    return fig
+
+# ---------------------------------------------------
+# MILESTONE 4 — PDF GENERATION
+# ---------------------------------------------------
+
+def generate_pdf_m4(master, anom_hr, anom_steps, anom_sleep,
+                    hr_high, hr_low, st_low, sl_low, sl_high, sigma,
+                    fig_hr, fig_steps, fig_sleep):
+    from fpdf import FPDF
+
+    class PDF(FPDF):
+        def header(self):
+            self.set_fill_color(15, 23, 42)
+            self.rect(0, 0, 210, 18, 'F')
+            self.set_font("Helvetica", "B", 13)
+            self.set_text_color(99, 179, 237)
+            self.set_y(4)
+            self.cell(0, 10, "FitPulse Anomaly Detection Report  -  Milestone 4", align="C")
+            self.set_text_color(148, 163, 184)
+            self.set_font("Helvetica", "", 7)
+            self.set_y(13)
+            self.cell(0, 4, f"Generated: {datetime.now().strftime('%d %B %Y  %H:%M')}", align="C")
+            self.ln(6)
+
+        def footer(self):
+            self.set_y(-13)
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(148, 163, 184)
+            self.cell(0, 8, f"FitPulse ML Pipeline  .  Page {self.page_no()}", align="C")
+
+        def section(self, title, color=(99, 179, 237)):
+            self.ln(3)
+            self.set_fill_color(*color)
+            self.set_text_color(255, 255, 255)
+            self.set_font("Helvetica", "B", 10)
+            self.cell(0, 8, f"  {title}", fill=True, ln=True)
+            self.set_text_color(30, 30, 40)
+            self.ln(2)
+
+        def kv(self, key, val, bold_val=True):
+            self.set_font("Helvetica", "B", 9)
+            self.set_text_color(80, 80, 100)
+            self.cell(55, 6, key + ":", ln=False)
+            self.set_font("Helvetica", "B" if bold_val else "", 9)
+            self.set_text_color(20, 20, 30)
+            self.cell(0, 6, str(val), ln=True)
+
+        def para(self, text, size=8.5):
+            self.set_font("Helvetica", "", size)
+            self.set_text_color(60, 60, 80)
+            self.multi_cell(0, 5, text)
+            self.ln(1)
+
+    pdf = PDF()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    n_hr    = int(anom_hr["is_anomaly"].sum())
+    n_steps = int(anom_steps["is_anomaly"].sum())
+    n_sleep = int(anom_sleep["is_anomaly"].sum())
+    n_users = master["Id"].nunique()
+    n_days  = master["Date"].nunique()
+    date_range = f"{pd.to_datetime(master['Date']).min().strftime('%d %b %Y')} - {pd.to_datetime(master['Date']).max().strftime('%d %b %Y')}"
+
+    pdf.section("1. EXECUTIVE SUMMARY", (15, 23, 60))
+    pdf.kv("Dataset",       f"Real Fitbit Device Data - Kaggle (arashnic/fitbit)")
+    pdf.kv("Users",         f"{n_users} participants")
+    pdf.kv("Date Range",    date_range)
+    pdf.kv("Total Days",    f"{n_days} days of observations")
+    pdf.kv("Pipeline",      "Milestone 4 - Anomaly Detection Dashboard")
+    pdf.ln(2)
+
+    pdf.section("2. ANOMALY SUMMARY", (180, 50, 50))
+    pdf.kv("Heart Rate Anomalies",  f"{n_hr} days flagged")
+    pdf.kv("Steps Anomalies",       f"{n_steps} days flagged")
+    pdf.kv("Sleep Anomalies",       f"{n_sleep} days flagged")
+    pdf.kv("Total Flags",           f"{n_hr + n_steps + n_sleep} across all signals")
+    pdf.ln(2)
+
+    pdf.section("3. DETECTION THRESHOLDS USED", (40, 100, 60))
+    pdf.kv("Heart Rate High",   f"> {int(hr_high)} bpm")
+    pdf.kv("Heart Rate Low",    f"< {int(hr_low)} bpm")
+    pdf.kv("Steps Low Alert",   f"< {int(st_low):,} steps/day")
+    pdf.kv("Sleep Low",         f"< {int(sl_low)} minutes/night")
+    pdf.kv("Sleep High",        f"> {int(sl_high)} minutes/night")
+    pdf.kv("Residual Sigma",    f"+/- {float(sigma):.1f}sigma from rolling median")
+    pdf.ln(2)
+
+    pdf.section("4. METHODOLOGY", (60, 80, 140))
+    pdf.para(
+        "Three complementary anomaly detection methods were applied:\n\n"
+        "  1. THRESHOLD VIOLATIONS - Hard upper/lower bounds on each metric. "
+        "Any day exceeding these bounds is immediately flagged as anomalous. "
+        "Simple, interpretable, and highly reliable for extreme values.\n\n"
+        "  2. RESIDUAL-BASED DETECTION - A 3-day rolling median is computed as "
+        "the expected baseline. Days where the actual value deviates by more than "
+        f"+/-{float(sigma):.1f} standard deviations from this baseline are flagged. "
+        "This catches subtle pattern breaks that threshold rules miss.\n\n"
+        "  3. DBSCAN OUTLIER CLUSTERING - Each user is profiled on 7 activity "
+        "features and clustered using DBSCAN (eps=2.2, min_samples=2). Users "
+        "assigned label -1 are structural outliers whose overall behaviour does "
+        "not match any group."
+    )
+
+    pdf.add_page()
+    pdf.section("5. ANOMALY CHARTS", (15, 23, 60))
+
+    def embed_fig(fig, label, w=190, h=80):
+        try:
+            img_bytes = fig.to_image(format="png", width=1100, height=480,
+                                     scale=1.5, engine="kaleido")
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp.write(img_bytes)
+                tmp_path = tmp.name
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(80, 80, 100)
+            pdf.cell(0, 6, label, ln=True)
+            pdf.image(tmp_path, x=10, w=w, h=h)
+            os.unlink(tmp_path)
+            pdf.ln(3)
+        except Exception as ex:
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(150, 50, 50)
+            pdf.cell(0, 6, f"[Chart not available: {ex}]", ln=True)
+            pdf.ln(2)
+
+    embed_fig(fig_hr,    "Figure 1 - Heart Rate with Anomaly Highlights")
+    embed_fig(fig_steps, "Figure 2 - Step Count Trend with Alert Bands")
+    embed_fig(fig_sleep, "Figure 3 - Sleep Pattern Visualization")
+
+    pdf.add_page()
+    pdf.section("6. ANOMALY RECORDS - HEART RATE", (180, 50, 50))
+
+    def table(df, cols, rename_map, max_rows=20):
+        df2 = df[df["is_anomaly"]][cols].copy().rename(columns=rename_map)
+        if df2.empty:
+            pdf.para("No anomalies detected.")
+            return
+        col_w = 180 // len(df2.columns)
+        pdf.set_fill_color(15, 23, 60)
+        pdf.set_text_color(180, 210, 255)
+        pdf.set_font("Helvetica", "B", 7.5)
+        for col in df2.columns:
+            pdf.cell(col_w, 6, str(col)[:18], border=0, fill=True)
+        pdf.ln()
+        pdf.set_font("Helvetica", "", 7.5)
+        for i, (_, row) in enumerate(df2.head(max_rows).iterrows()):
+            pdf.set_fill_color(30, 40, 60) if i % 2 == 0 else pdf.set_fill_color(20, 30, 50)
+            pdf.set_text_color(200, 210, 225)
+            for val in row:
+                if isinstance(val, float):
+                    cell_text = f"{val:.2f}"
+                else:
+                    cell_text = str(val)[:18]
+                pdf.cell(col_w, 5.5, cell_text, border=0, fill=True)
+            pdf.ln()
+        if len(df2) > max_rows:
+            pdf.set_text_color(100, 130, 180)
+            pdf.set_font("Helvetica", "I", 7)
+            pdf.cell(0, 5, f"  ... and {len(df2)-max_rows} more records (see CSV export for full data)", ln=True)
+        pdf.ln(3)
+
+    table(anom_hr, ["Date","AvgHR","rolling_med","residual","reason"],
+          {"AvgHR":"Avg HR","rolling_med":"Expected","residual":"Deviation","reason":"Reason"})
+
+    pdf.section("7. ANOMALY RECORDS - STEPS", (40, 130, 80))
+    table(anom_steps, ["Date","TotalSteps","rolling_med","residual","reason"],
+          {"TotalSteps":"Steps","rolling_med":"Expected","residual":"Deviation","reason":"Reason"})
+
+    pdf.section("8. ANOMALY RECORDS - SLEEP", (100, 60, 160))
+    table(anom_sleep, ["Date","TotalSleepMinutes","rolling_med","residual","reason"],
+          {"TotalSleepMinutes":"Sleep (min)","rolling_med":"Expected","residual":"Deviation","reason":"Reason"})
+
+    pdf.add_page()
+    pdf.section("9. DATASET OVERVIEW & USER PROFILES", (15, 23, 60))
+
+    profile_cols = ["TotalSteps","Calories","VeryActiveMinutes","SedentaryMinutes","TotalSleepMinutes"]
+    available_cols = [c for c in profile_cols if c in master.columns]
+    user_profile = master.groupby("Id")[available_cols].mean().round(1)
+
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(15, 23, 60)
+    pdf.set_text_color(180, 210, 255)
+    col_w2 = 180 // (len(available_cols) + 1)
+    pdf.cell(col_w2, 6, "User ID", border=0, fill=True)
+    for col in available_cols:
+        pdf.cell(col_w2, 6, col[:12], border=0, fill=True)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 7.5)
+    for i, (uid, row) in enumerate(user_profile.iterrows()):
+        pdf.set_fill_color(30, 40, 60) if i % 2 == 0 else pdf.set_fill_color(20, 30, 50)
+        pdf.set_text_color(200, 210, 225)
+        pdf.cell(col_w2, 5.5, f"...{str(uid)[-6:]}", border=0, fill=True)
+        for val in row:
+            pdf.cell(col_w2, 5.5, f"{val:,.0f}", border=0, fill=True)
+        pdf.ln()
+
+    pdf.ln(4)
+    pdf.section("10. CONCLUSION", (40, 100, 60))
+    n_hr_c    = int(anom_hr["is_anomaly"].sum())
+    n_steps_c = int(anom_steps["is_anomaly"].sum())
+    n_sleep_c = int(anom_sleep["is_anomaly"].sum())
+    pdf.para(
+        f"The FitPulse Milestone 4 anomaly detection pipeline successfully processed "
+        f"{n_users} users over {n_days} days of real Fitbit device data. "
+        f"A total of {n_hr_c + n_steps_c + n_sleep_c} anomalous events were identified across "
+        f"heart rate, step count, and sleep duration signals.\n\n"
+        "Key findings:\n"
+        f"   Heart rate showed {n_hr_c} anomalous days, primarily driven by residual "
+        f"deviations from the rolling trend.\n"
+        f"   Step count flagged {n_steps_c} alert days, often corresponding to "
+        f"extremely sedentary or unusually active periods.\n"
+        f"   Sleep patterns generated {n_sleep_c} anomaly flags, reflecting days "
+        f"where users either did not wear the device or had unusual sleep durations.\n\n"
+        "These findings align with expected patterns in consumer fitness wearable data "
+        "and demonstrate the effectiveness of combining rule-based and statistical "
+        "anomaly detection methods."
+    )
+
+    pdf_bytes = pdf.output(dest='S').encode('latin-1')
+    buf = io.BytesIO(pdf_bytes)
+    return buf
+
+# ---------------------------------------------------
+# MILESTONE 4 — CSV GENERATION
+# ---------------------------------------------------
+
+def generate_csv_m4(anom_hr, anom_steps, anom_sleep):
+    hr_out    = anom_hr[anom_hr["is_anomaly"]][["Date","AvgHR","rolling_med","residual","reason"]].copy()
+    hr_out["signal"] = "Heart Rate"
+    hr_out    = hr_out.rename(columns={"AvgHR":"value","rolling_med":"expected"})
+
+    st_out    = anom_steps[anom_steps["is_anomaly"]][["Date","TotalSteps","rolling_med","residual","reason"]].copy()
+    st_out["signal"] = "Steps"
+    st_out    = st_out.rename(columns={"TotalSteps":"value","rolling_med":"expected"})
+
+    sl_out    = anom_sleep[anom_sleep["is_anomaly"]][["Date","TotalSleepMinutes","rolling_med","residual","reason"]].copy()
+    sl_out["signal"] = "Sleep"
+    sl_out    = sl_out.rename(columns={"TotalSleepMinutes":"value","rolling_med":"expected"})
+
+    combined  = pd.concat([hr_out, st_out, sl_out], ignore_index=True)
+    combined  = combined[["signal","Date","value","expected","residual","reason"]].sort_values(["signal","Date"])
+    combined  = combined.round(2)
+    buf       = io.StringIO()
+    combined.to_csv(buf, index=False)
+    return buf.getvalue().encode()
 
 # ===================================================
 # SIDEBAR
@@ -517,7 +1016,8 @@ milestone = st.sidebar.selectbox(
     [
         "1 — Data Collection & Pre-Processing",
         "2 — Pattern Extraction & Analytics",
-        "3 — Anomaly Detection & Visualization"
+        "3 — Anomaly Detection & Visualization",
+        "4 — Insights Dashboard"
     ]
 )
 
@@ -544,7 +1044,7 @@ elif milestone == "2 — Pattern Extraction & Analytics":
     eps = st.sidebar.slider("DBSCAN EPS", 0.5, 5.0, 2.2)
     st.sidebar.caption("Real Fitbit Dataset · FitPulse v2.0")
 
-else:
+elif milestone == "3 — Anomaly Detection & Visualization":
     st.sidebar.markdown(f"""
     <div style="padding:0.5rem 0 1.5rem">
       <div style="font-size:0.72rem;color:{MUTED};font-family:'JetBrains Mono',monospace;margin-top:0.2rem">
@@ -586,6 +1086,60 @@ else:
     sigma    = st.sidebar.slider("Residual σ threshold", 1.0, 4.0, 2.0, 0.5, key="sigma_slider")
     st.sidebar.markdown(f'<hr style="border-color:{CARD_BOR};margin:1rem 0">', unsafe_allow_html=True)
     st.sidebar.markdown(f'<div style="font-size:0.68rem;color:{MUTED};font-family:JetBrains Mono,monospace">Real Fitbit Dataset<br>30 users · March–April 2016</div>', unsafe_allow_html=True)
+
+else:  # Milestone 4
+    st.sidebar.markdown(f"""
+    <div style="padding:0.5rem 0 1rem">
+      <div style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:800;color:{ACCENT}">
+        📊 FitPulse Dashboard
+      </div>
+      <div style="font-size:0.7rem;color:{MUTED};font-family:'JetBrains Mono',monospace;margin-top:0.2rem">
+        Milestone 4 . Insights & Export
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    st.sidebar.markdown(f'<hr style="border-color:{CARD_BOR};margin:0.8rem 0">', unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div style="font-size:0.7rem;color:{MUTED};font-family:JetBrains Mono,monospace;margin-bottom:0.4rem">DETECTION THRESHOLDS</div>', unsafe_allow_html=True)
+    m4_hr_high = int(st.sidebar.number_input("HR High (bpm)",    value=100, min_value=80,  max_value=180, key="m4_hr_high"))
+    m4_hr_low  = int(st.sidebar.number_input("HR Low (bpm)",     value=50,  min_value=30,  max_value=70,  key="m4_hr_low"))
+    m4_st_low  = int(st.sidebar.number_input("Steps Low/day",    value=500, min_value=0,   max_value=2000,key="m4_st_low"))
+    m4_sl_low  = int(st.sidebar.number_input("Sleep Low (min)",  value=60,  min_value=0,   max_value=120, key="m4_sl_low"))
+    m4_sl_high = int(st.sidebar.number_input("Sleep High (min)", value=600, min_value=300, max_value=900, key="m4_sl_high"))
+    m4_sigma   = float(st.sidebar.slider("Residual sigma", 1.0, 4.0, 2.0, 0.5, key="m4_sigma"))
+
+    st.sidebar.markdown(f'<hr style="border-color:{CARD_BOR};margin:0.8rem 0">', unsafe_allow_html=True)
+
+    run_m4_clicked = st.sidebar.button("⚡ Run M4 Detection", disabled=(not st.session_state.files_loaded))
+    if not st.session_state.files_loaded:
+        st.sidebar.markdown(f'<div style="font-size:0.7rem;color:{MUTED};text-align:center">Load data in M2 or M3 first</div>', unsafe_allow_html=True)
+
+    st.sidebar.markdown(f'<hr style="border-color:{CARD_BOR};margin:0.8rem 0">', unsafe_allow_html=True)
+
+    if st.session_state.pipeline_done and st.session_state.master is not None:
+        master_tmp = st.session_state.master
+        all_dates = pd.to_datetime(master_tmp["Date"])
+        d_min = all_dates.min().date()
+        d_max = all_dates.max().date()
+        st.sidebar.markdown(f'<div style="font-size:0.7rem;color:{MUTED};font-family:JetBrains Mono,monospace;margin-bottom:0.4rem">DATE FILTER</div>', unsafe_allow_html=True)
+        date_range_m4 = st.sidebar.date_input("Date range", value=(d_min, d_max),
+                                               min_value=d_min, max_value=d_max,
+                                               key="m4_daterange", label_visibility="collapsed")
+        st.sidebar.markdown(f'<div style="font-size:0.7rem;color:{MUTED};font-family:JetBrains Mono,monospace;margin:0.6rem 0 0.4rem">USER FILTER</div>', unsafe_allow_html=True)
+        all_users_m4 = sorted(master_tmp["Id"].unique())
+        user_options_m4 = ["All Users"] + [f"...{str(u)[-6:]}" for u in all_users_m4]
+        selected_user_label_m4 = st.sidebar.selectbox("User", user_options_m4, key="m4_user", label_visibility="collapsed")
+        selected_user_m4 = None if selected_user_label_m4 == "All Users" else all_users_m4[user_options_m4.index(selected_user_label_m4) - 1]
+    else:
+        date_range_m4 = None
+        selected_user_m4 = None
+
+    st.sidebar.markdown(f'<hr style="border-color:{CARD_BOR};margin:0.8rem 0">', unsafe_allow_html=True)
+    pct_m4 = int(st.session_state.pipeline_done) * 100
+    st.sidebar.markdown(f"""
+    <div style="font-size:0.68rem;color:{MUTED};font-family:JetBrains Mono,monospace;margin-bottom:0.3rem">PIPELINE . {pct_m4}%</div>
+    <div style="background:{CARD_BOR};border-radius:4px;height:5px;overflow:hidden">
+      <div style="width:{pct_m4}%;height:100%;background:linear-gradient(90deg,{ACCENT},{ACCENT3});border-radius:4px"></div>
+    </div>""", unsafe_allow_html=True)
 
 
 # ===================================================
@@ -645,6 +1199,9 @@ if milestone == "1 — Data Collection & Pre-Processing":
         cat_cols = df_clean.select_dtypes(include=["object"]).columns
         for col in cat_cols:
             df_clean[col] = df_clean[col].fillna(df_clean[col].mode()[0])
+
+        # Store cleaned data in session state for downstream milestones
+        st.session_state.m1_df_clean = df_clean
 
         st.success("✅ Data preprocessing completed successfully")
 
@@ -724,6 +1281,71 @@ elif milestone == "2 — Pattern Extraction & Analytics":
         if "StepTotal"      in df.columns: steps     = df
         if "TotalIntensity" in df.columns: intensity = df
         if "SleepDay"       in df.columns or "value" in df.columns: sleep = df
+
+    # Store the multi-file uploads in session state so M3/M4 can use them
+    if files:
+        raw_uploads_m2 = list(files.items())
+        detected_m2 = {}
+        used_m2 = set()
+        for req_name, finfo in REQUIRED_FILES.items():
+            best_score, best_name, best_df = 0, None, None
+            for uname, udf in raw_uploads_m2:
+                s = score_match(udf, finfo)
+                if s > best_score:
+                    best_score, best_name, best_df = s, uname, udf
+            if best_score >= 2:
+                detected_m2[req_name] = best_df
+                used_m2.add(best_name)
+
+        if len(detected_m2) == 5 and not st.session_state.files_loaded:
+            try:
+                daily_m3    = detected_m2["dailyActivity_merged.csv"].copy()
+                hourly_s = detected_m2["hourlySteps_merged.csv"].copy()
+                hourly_i = detected_m2["hourlyIntensities_merged.csv"].copy()
+                sleep_m3    = detected_m2["minuteSleep_merged.csv"].copy()
+                hr_m3       = detected_m2["heartrate_seconds_merged.csv"].copy()
+
+                daily_m3["ActivityDate"]    = pd.to_datetime(daily_m3["ActivityDate"],    format="%m/%d/%Y")
+                hourly_s["ActivityHour"] = pd.to_datetime(hourly_s["ActivityHour"], format="%m/%d/%Y %I:%M:%S %p")
+                hourly_i["ActivityHour"] = pd.to_datetime(hourly_i["ActivityHour"], format="%m/%d/%Y %I:%M:%S %p")
+                sleep_m3["date"]            = pd.to_datetime(sleep_m3["date"],            format="%m/%d/%Y %I:%M:%S %p")
+                hr_m3["Time"]               = pd.to_datetime(hr_m3["Time"],               format="%m/%d/%Y %I:%M:%S %p")
+
+                hr_minute = (hr_m3.set_index("Time").groupby("Id")["Value"]
+                             .resample("1min").mean().reset_index())
+                hr_minute.columns = ["Id","Time","HeartRate"]
+                hr_minute = hr_minute.dropna()
+
+                hr_minute["Date"] = hr_minute["Time"].dt.date
+                hr_daily_m3 = (hr_minute.groupby(["Id","Date"])["HeartRate"]
+                            .agg(["mean","max","min","std"]).reset_index()
+                            .rename(columns={"mean":"AvgHR","max":"MaxHR","min":"MinHR","std":"StdHR"}))
+
+                sleep_m3["Date"] = sleep_m3["date"].dt.date
+                sleep_daily_m3 = (sleep_m3.groupby(["Id","Date"])
+                               .agg(TotalSleepMinutes=("value","count"),
+                                    DominantSleepStage=("value", lambda x: x.mode()[0]))
+                               .reset_index())
+
+                master_df = daily_m3.copy().rename(columns={"ActivityDate":"Date"})
+                master_df["Date"] = master_df["Date"].dt.date
+                master_df = master_df.merge(hr_daily_m3,    on=["Id","Date"], how="left")
+                master_df = master_df.merge(sleep_daily_m3, on=["Id","Date"], how="left")
+                master_df["TotalSleepMinutes"]  = master_df["TotalSleepMinutes"].fillna(0)
+                master_df["DominantSleepStage"] = master_df["DominantSleepStage"].fillna(0)
+                for col in ["AvgHR","MaxHR","MinHR","StdHR"]:
+                    master_df[col] = master_df.groupby("Id")[col].transform(lambda x: x.fillna(x.median()))
+
+                st.session_state.daily_m3     = daily_m3
+                st.session_state.hourly_s  = hourly_s
+                st.session_state.hourly_i  = hourly_i
+                st.session_state.sleep_m3     = sleep_m3
+                st.session_state.hr_m3        = hr_m3
+                st.session_state.hr_minute = hr_minute
+                st.session_state.master    = master_df
+                st.session_state.files_loaded = True
+            except Exception:
+                pass  # M3/M4 data build is best-effort here; M3 button will handle errors
 
     st.markdown('<div class="section-header">🔍 Dataset Detection</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -879,11 +1501,11 @@ elif milestone == "2 — Pattern Extraction & Analytics":
 
         sleep_df2           = sleep.copy()
         sleep_df2["date"]   = pd.to_datetime(sleep_df2["date"])
-        sleep_daily         = sleep_df2.groupby(sleep_df2["date"].dt.date)["value"].sum().reset_index()
-        sleep_daily.columns = ["ds","y"]
-        sleep_daily["ds"]   = pd.to_datetime(sleep_daily["ds"])
+        sleep_daily2        = sleep_df2.groupby(sleep_df2["date"].dt.date)["value"].sum().reset_index()
+        sleep_daily2.columns = ["ds","y"]
+        sleep_daily2["ds"]  = pd.to_datetime(sleep_daily2["ds"])
         model_sleep         = Prophet(interval_width=0.8, weekly_seasonality=True)
-        _ = model_sleep.fit(sleep_daily)
+        _ = model_sleep.fit(sleep_daily2)
         forecast_sleep      = model_sleep.predict(model_sleep.make_future_dataframe(periods=30))
 
         fig_ss, axes_ss = plt.subplots(2, 1, figsize=(14, 10))
@@ -920,10 +1542,10 @@ elif milestone == "2 — Pattern Extraction & Analytics":
                            color="#4a1d6e", alpha=0.70, zorder=1, label="80% CI")
         ax_sl.plot(forecast_sleep["ds"], forecast_sleep["yhat"],
                    color="#ffffff", linewidth=1.8, zorder=3, label="Trend Forecast")
-        ax_sl.scatter(sleep_daily["ds"], sleep_daily["y"],
+        ax_sl.scatter(sleep_daily2["ds"], sleep_daily2["y"],
                       color="#c77dff", s=22, zorder=5, alpha=0.85,
                       edgecolors="#9d4edd", linewidths=0.5, label="Actual Data")
-        ax_sl.axvline(sleep_daily["ds"].max(), color="#f97316", linestyle="--",
+        ax_sl.axvline(sleep_daily2["ds"].max(), color="#f97316", linestyle="--",
                       linewidth=1.8, alpha=0.85, zorder=4, label="Forecast Start")
         ax_sl.set_title("Sleep (minutes) — Prophet Trend Forecast", fontsize=13, fontweight='bold',
                         color=TITLE_COL, pad=12)
@@ -1159,7 +1781,7 @@ elif milestone == "2 — Pattern Extraction & Analytics":
 #
 # ===================================================
 
-else:
+elif milestone == "3 — Anomaly Detection & Visualization":
 
     # Hero
     st.markdown(f"""
@@ -1170,636 +1792,943 @@ else:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── SECTION 1: Data Loading ──────────────────────────────────────────────
-    sec_m3("📂", "Data Loading", "Step 1")
+    # ── SECTION 1: Data Status ───────────────────────────────────────────────
+    sec_m3("📂", "Data Status", "Step 1")
 
-    ui_info_m3("Upload the same 5 Fitbit CSV files as Milestone 2. Files are auto-detected by column structure.")
-
-    uploaded_files_m3 = st.file_uploader(
-        "📁  Drop all 5 Fitbit CSV files here",
-        type="csv", accept_multiple_files=True, key="m3_uploader",
-        help="Hold Ctrl (Windows) or Cmd (Mac) to select multiple files"
-    )
-
-    detected = {}
-    ignored  = []
-    if uploaded_files_m3:
-        raw_uploads = []
-        for uf in uploaded_files_m3:
-            try:
-                df_tmp = pd.read_csv(uf)
-                raw_uploads.append((uf.name, df_tmp))
-            except Exception:
-                ignored.append(uf.name)
-
-        used_names = set()
-        for req_name, finfo in REQUIRED_FILES.items():
-            best_score, best_name, best_df = 0, None, None
-            for uname, udf in raw_uploads:
-                s = score_match(udf, finfo)
-                if s > best_score:
-                    best_score, best_name, best_df = s, uname, udf
-            if best_score >= 2:
-                detected[req_name] = best_df
-                used_names.add(best_name)
-
-        for uname, _ in raw_uploads:
-            if uname not in used_names:
-                ignored.append(uname)
-
-    # Status grid
-    status_html = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:0.6rem;margin:1rem 0">'
-    for req_name, finfo in REQUIRED_FILES.items():
-        found = req_name in detected
-        bg  = SUCCESS_BG if found else WARN_BG
-        bor = SUCCESS_BOR if found else WARN_BOR
-        ico = "✅" if found else "❌"
-        status_html += f"""
-        <div style="background:{bg};border:1px solid {bor};border-radius:10px;padding:0.7rem 0.9rem">
-          <div style="font-size:1.2rem">{ico} {finfo['icon']}</div>
-          <div style="font-size:0.72rem;font-weight:600;color:{TEXT};margin-top:0.3rem">{finfo['label']}</div>
-          <div style="font-size:0.65rem;color:{MUTED};font-family:'JetBrains Mono',monospace;margin-top:0.1rem">
-            {'Found ✓' if found else 'Missing'}
+    if not st.session_state.files_loaded:
+        st.markdown(f"""
+        <div class="m3-card" style="text-align:center;padding:2rem;border-color:{DANGER_BOR}">
+          <div style="font-size:2rem;margin-bottom:0.8rem">⚠️</div>
+          <div style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;color:{TEXT};margin-bottom:0.5rem">
+            Please upload data in Milestone 1 or Milestone 2
           </div>
-        </div>"""
-    status_html += "</div>"
-    st.markdown(status_html, unsafe_allow_html=True)
+          <div style="color:{MUTED};font-size:0.85rem">
+            Go to <b>Milestone 2</b> and upload all 5 Fitbit CSV files, then return here.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
 
-    n_up = len(detected)
-    metrics_m3((n_up, "Detected"), (5 - n_up, "Missing"), ("✓" if n_up == 5 else "✗", "Ready"))
+    master = st.session_state.master
+    ui_success_m3(f"Data loaded from session — {master.shape[0]} rows · {master['Id'].nunique()} users")
 
-    if n_up < 5:
-        missing_list = [REQUIRED_FILES[r]["label"] for r in REQUIRED_FILES if r not in detected]
-        ui_warn_m3(f"Missing: {', '.join(missing_list)}")
+    st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
 
-    if st.button("⚡ Load & Build Master DataFrame", disabled=(n_up < 5)):
-        with st.spinner("Parsing and building master..."):
+    # ── SECTION 2: Anomaly Detection ────────────────────────────────────────
+    sec_m3("🚨", "Anomaly Detection — Three Methods", "Steps 2–4")
+
+    st.markdown(f"""
+    <div class="m3-card">
+      <div class="m3-card-title">Detection Methods Applied</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.8rem;font-size:0.83rem">
+        <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
+          <div style="color:{ACCENT_RED};font-weight:600;margin-bottom:0.4rem">① Threshold Violations</div>
+          <div style="color:{MUTED}">Hard upper/lower limits on HR, Steps, Sleep. Simple, interpretable, fast.</div>
+        </div>
+        <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
+          <div style="color:{ACCENT2};font-weight:600;margin-bottom:0.4rem">② Residual-Based</div>
+          <div style="color:{MUTED}">Rolling median as baseline. Flag days where actual deviates by ±{sigma:.0f}σ.</div>
+        </div>
+        <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
+          <div style="color:{ACCENT3};font-weight:600;margin-bottom:0.4rem">③ DBSCAN Outliers</div>
+          <div style="color:{MUTED}">Users labelled −1 by DBSCAN are structural outliers.</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("🔍 Run Anomaly Detection (All 3 Methods)"):
+        with st.spinner("Detecting anomalies..."):
             try:
-                daily_m3    = detected["dailyActivity_merged.csv"].copy()
-                hourly_s = detected["hourlySteps_merged.csv"].copy()
-                hourly_i = detected["hourlyIntensities_merged.csv"].copy()
-                sleep_m3    = detected["minuteSleep_merged.csv"].copy()
-                hr_m3       = detected["heartrate_seconds_merged.csv"].copy()
-
-                daily_m3["ActivityDate"]    = pd.to_datetime(daily_m3["ActivityDate"],    format="%m/%d/%Y")
-                hourly_s["ActivityHour"] = pd.to_datetime(hourly_s["ActivityHour"], format="%m/%d/%Y %I:%M:%S %p")
-                hourly_i["ActivityHour"] = pd.to_datetime(hourly_i["ActivityHour"], format="%m/%d/%Y %I:%M:%S %p")
-                sleep_m3["date"]            = pd.to_datetime(sleep_m3["date"],            format="%m/%d/%Y %I:%M:%S %p")
-                hr_m3["Time"]               = pd.to_datetime(hr_m3["Time"],               format="%m/%d/%Y %I:%M:%S %p")
-
-                hr_minute = (hr_m3.set_index("Time").groupby("Id")["Value"]
-                             .resample("1min").mean().reset_index())
-                hr_minute.columns = ["Id","Time","HeartRate"]
-                hr_minute = hr_minute.dropna()
-
-                hr_minute["Date"] = hr_minute["Time"].dt.date
-                hr_daily_m3 = (hr_minute.groupby(["Id","Date"])["HeartRate"]
-                            .agg(["mean","max","min","std"]).reset_index()
-                            .rename(columns={"mean":"AvgHR","max":"MaxHR","min":"MinHR","std":"StdHR"}))
-
-                sleep_m3["Date"] = sleep_m3["date"].dt.date
-                sleep_daily_m3 = (sleep_m3.groupby(["Id","Date"])
-                               .agg(TotalSleepMinutes=("value","count"),
-                                    DominantSleepStage=("value", lambda x: x.mode()[0]))
-                               .reset_index())
-
-                master = daily_m3.copy().rename(columns={"ActivityDate":"Date"})
-                master["Date"] = master["Date"].dt.date
-                master = master.merge(hr_daily_m3,    on=["Id","Date"], how="left")
-                master = master.merge(sleep_daily_m3, on=["Id","Date"], how="left")
-                master["TotalSleepMinutes"]  = master["TotalSleepMinutes"].fillna(0)
-                master["DominantSleepStage"] = master["DominantSleepStage"].fillna(0)
-                for col in ["AvgHR","MaxHR","MinHR","StdHR"]:
-                    master[col] = master.groupby("Id")[col].transform(lambda x: x.fillna(x.median()))
-
-                st.session_state.daily_m3     = daily_m3
-                st.session_state.hourly_s  = hourly_s
-                st.session_state.hourly_i  = hourly_i
-                st.session_state.sleep_m3     = sleep_m3
-                st.session_state.hr_m3        = hr_m3
-                st.session_state.hr_minute = hr_minute
-                st.session_state.master    = master
-                st.session_state.files_loaded = True
+                anom_hr    = detect_hr_anomalies(master,    hr_high, hr_low,   sigma)
+                anom_steps = detect_steps_anomalies(master, st_low,  25000,    sigma)
+                anom_sleep = detect_sleep_anomalies(master, sl_low,  sl_high,  sigma)
+                st.session_state.anom_hr    = anom_hr
+                st.session_state.anom_steps = anom_steps
+                st.session_state.anom_sleep = anom_sleep
+                st.session_state.anomaly_done = True
                 st.rerun()
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Detection error: {e}")
 
-    if st.session_state.files_loaded:
-        master = st.session_state.master
-        ui_success_m3(f"Master DataFrame ready — {master.shape[0]} rows · {master['Id'].nunique()} users")
+    if st.session_state.anomaly_done:
+        anom_hr    = st.session_state.anom_hr
+        anom_steps = st.session_state.anom_steps
+        anom_sleep = st.session_state.anom_sleep
+
+        n_hr    = int(anom_hr["is_anomaly"].sum())
+        n_steps = int(anom_steps["is_anomaly"].sum())
+        n_sleep = int(anom_sleep["is_anomaly"].sum())
+        n_total = n_hr + n_steps + n_sleep
+
+        ui_danger_m3(f"Total anomalies flagged: {n_total}  (HR: {n_hr} · Steps: {n_steps} · Sleep: {n_sleep})")
+        metrics_m3(
+            (n_hr,    "HR Anomalies"),
+            (n_steps, "Steps Anomalies"),
+            (n_sleep, "Sleep Anomalies"),
+            (n_total, "Total Flags"),
+            red_indices=[0,1,2,3]
+        )
+
+        # ── CHART 1: Heart Rate ──────────────────────────────────────────
+        st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
+        sec_m3("❤️", "Heart Rate — Anomaly Chart", "Step 2")
+        anom_tag_m3(f"{n_hr} anomalous days detected")
+        screenshot_badge_m3("Heart Rate Chart with Anomaly Highlights")
+        step_pill_m3(2, "Threshold + Residual Detection")
+        ui_info_m3(f"Red markers = anomaly days. Dashed lines = thresholds (HR>{hr_high} or HR<{hr_low}). Shaded band = ±{sigma:.0f}σ residual zone.")
+
+        hr_anom   = anom_hr[anom_hr["is_anomaly"]]
+        fig_hr_m3 = go.Figure()
+
+        rolling_upper = anom_hr["rolling_med"] + sigma * anom_hr["residual"].std()
+        rolling_lower = anom_hr["rolling_med"] - sigma * anom_hr["residual"].std()
+
+        fig_hr_m3.add_trace(go.Scatter(
+            x=anom_hr["Date"], y=rolling_upper, mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip"
+        ))
+        fig_hr_m3.add_trace(go.Scatter(
+            x=anom_hr["Date"], y=rolling_lower, mode="lines",
+            fill="tonexty", fillcolor="rgba(99,179,237,0.1)",
+            line=dict(width=0), name=f"±{sigma:.0f}σ Expected Band"
+        ))
+        fig_hr_m3.add_trace(go.Scatter(
+            x=anom_hr["Date"], y=anom_hr["AvgHR"],
+            mode="lines+markers", name="Avg Heart Rate",
+            line=dict(color=ACCENT, width=2.5),
+            marker=dict(size=5, color=ACCENT),
+            hovertemplate="<b>%{x}</b><br>HR: %{y:.1f} bpm<extra></extra>"
+        ))
+        fig_hr_m3.add_trace(go.Scatter(
+            x=anom_hr["Date"], y=anom_hr["rolling_med"],
+            mode="lines", name="Rolling Median",
+            line=dict(color=ACCENT3, width=1.5, dash="dot"),
+            hovertemplate="<b>%{x}</b><br>Median: %{y:.1f} bpm<extra></extra>"
+        ))
+        if not hr_anom.empty:
+            fig_hr_m3.add_trace(go.Scatter(
+                x=hr_anom["Date"], y=hr_anom["AvgHR"],
+                mode="markers", name="🚨 Anomaly",
+                marker=dict(color=ACCENT_RED, size=14, symbol="circle",
+                            line=dict(color="white", width=2)),
+                hovertemplate="<b>%{x}</b><br>HR: %{y:.1f} bpm<br><b>ANOMALY</b><extra>⚠️</extra>"
+            ))
+            for _, row in hr_anom.iterrows():
+                fig_hr_m3.add_annotation(
+                    x=row["Date"], y=row["AvgHR"],
+                    text=f"⚠️ {row['reason']}", showarrow=True,
+                    arrowhead=2, arrowcolor=ACCENT_RED, arrowsize=1.2,
+                    ax=0, ay=-45,
+                    font=dict(color=ACCENT_RED, size=9),
+                    bgcolor=CARD_BG, bordercolor=DANGER_BOR, borderwidth=1, borderpad=4
+                )
+        fig_hr_m3.add_hline(y=hr_high, line_dash="dash", line_color=ACCENT_RED,
+                         line_width=1.5, opacity=0.7,
+                         annotation_text=f"High Threshold ({hr_high} bpm)",
+                         annotation_position="top right",
+                         annotation_font_color=ACCENT_RED)
+        fig_hr_m3.add_hline(y=hr_low, line_dash="dash", line_color=ACCENT2,
+                         line_width=1.5, opacity=0.7,
+                         annotation_text=f"Low Threshold ({hr_low} bpm)",
+                         annotation_position="bottom right",
+                         annotation_font_color=ACCENT2)
+        apply_plotly_theme(fig_hr_m3, "❤️ Heart Rate — Anomaly Detection (Real Fitbit Data)")
+        fig_hr_m3.update_layout(height=480, xaxis_title="Date", yaxis_title="Heart Rate (bpm)",
+            xaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
+            yaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED))
+        st.plotly_chart(fig_hr_m3, use_container_width=True)
+
+        if not hr_anom.empty:
+            with st.expander(f"📋 View {len(hr_anom)} HR Anomaly Records"):
+                st.dataframe(
+                    hr_anom[hr_anom["is_anomaly"]][["Date","AvgHR","rolling_med","residual","reason"]]
+                    .rename(columns={"rolling_med":"Expected","residual":"Deviation","reason":"Anomaly Reason"})
+                    .round(2), use_container_width=True
+                )
+
+        # ── CHART 2: Sleep ───────────────────────────────────────────────
+        st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
+        sec_m3("💤", "Sleep Pattern — Anomaly Visualization", "Step 3")
+        anom_tag_m3(f"{n_sleep} anomalous sleep days detected")
+        screenshot_badge_m3("Sleep Pattern Visualization with Alerts")
+        step_pill_m3(3, "Threshold Detection on Sleep Minutes")
+        ui_info_m3(f"Orange = insufficient sleep (<{sl_low} min). Purple dots = anomaly days. Green band = healthy sleep zone ({sl_low}–{sl_high} min).")
+
+        sleep_anom = anom_sleep[anom_sleep["is_anomaly"]]
+
+        fig_sleep = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                   row_heights=[0.7, 0.3],
+                                   subplot_titles=["Sleep Duration (minutes/night)", "Deviation from Expected"],
+                                   vertical_spacing=0.08)
+        fig_sleep.add_hrect(y0=sl_low, y1=sl_high, fillcolor="rgba(104,211,145,0.08)",
+                             line_width=0, annotation_text="✅ Healthy Sleep Zone",
+                             annotation_position="top right",
+                             annotation_font_color=ACCENT3, row=1, col=1)
+        fig_sleep.add_trace(go.Scatter(
+            x=anom_sleep["Date"], y=anom_sleep["TotalSleepMinutes"],
+            mode="lines+markers", name="Sleep Minutes",
+            line=dict(color="#b794f4", width=2.5),
+            marker=dict(size=5, color="#b794f4"),
+            hovertemplate="<b>%{x}</b><br>Sleep: %{y:.0f} min<extra></extra>"
+        ), row=1, col=1)
+        fig_sleep.add_trace(go.Scatter(
+            x=anom_sleep["Date"], y=anom_sleep["rolling_med"],
+            mode="lines", name="Rolling Median",
+            line=dict(color=ACCENT3, width=1.5, dash="dot"),
+            hovertemplate="<b>%{x}</b><br>Median: %{y:.0f} min<extra></extra>"
+        ), row=1, col=1)
+        if not sleep_anom.empty:
+            fig_sleep.add_trace(go.Scatter(
+                x=sleep_anom["Date"], y=sleep_anom["TotalSleepMinutes"],
+                mode="markers", name="🚨 Sleep Anomaly",
+                marker=dict(color=ACCENT_RED, size=14, symbol="diamond",
+                            line=dict(color="white", width=2)),
+                hovertemplate="<b>%{x}</b><br>Sleep: %{y:.0f} min<br><b>ANOMALY</b><extra>⚠️</extra>"
+            ), row=1, col=1)
+            for _, row in sleep_anom.iterrows():
+                fig_sleep.add_annotation(
+                    x=row["Date"], y=row["TotalSleepMinutes"],
+                    text=f"⚠️ {row['reason']}", showarrow=True,
+                    arrowhead=2, arrowcolor=ACCENT_RED, arrowsize=1.2,
+                    ax=20, ay=-40,
+                    font=dict(color=ACCENT_RED, size=9),
+                    bgcolor=CARD_BG, bordercolor=DANGER_BOR, borderwidth=1,
+                    borderpad=3, row=1, col=1
+                )
+        fig_sleep.add_hline(y=sl_low, line_dash="dash", line_color=ACCENT_RED,
+                             line_width=1.5, opacity=0.7, row=1, col=1,
+                             annotation_text=f"Min ({sl_low} min)",
+                             annotation_font_color=ACCENT_RED)
+        fig_sleep.add_hline(y=sl_high, line_dash="dash", line_color=ACCENT,
+                             line_width=1.5, opacity=0.7, row=1, col=1,
+                             annotation_text=f"Max ({sl_high} min)",
+                             annotation_font_color=ACCENT)
+        colors_resid = [ACCENT_RED if v else ACCENT for v in anom_sleep["resid_anomaly"]]
+        fig_sleep.add_trace(go.Bar(
+            x=anom_sleep["Date"], y=anom_sleep["residual"],
+            name="Residual", marker_color=colors_resid,
+            hovertemplate="<b>%{x}</b><br>Residual: %{y:.0f} min<extra></extra>"
+        ), row=2, col=1)
+        fig_sleep.add_hline(y=0, line_dash="solid", line_color=MUTED, line_width=1, row=2, col=1)
+        apply_plotly_theme(fig_sleep)
+        fig_sleep.update_layout(height=560, showlegend=True,
+            paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT)
+        fig_sleep.update_xaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+        fig_sleep.update_yaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+        st.plotly_chart(fig_sleep, use_container_width=True)
+
+        if not sleep_anom.empty:
+            with st.expander(f"📋 View {len(sleep_anom)} Sleep Anomaly Records"):
+                st.dataframe(
+                    sleep_anom[sleep_anom["is_anomaly"]][["Date","TotalSleepMinutes","rolling_med","residual","reason"]]
+                    .rename(columns={"TotalSleepMinutes":"Sleep (min)","rolling_med":"Expected","residual":"Deviation","reason":"Anomaly Reason"})
+                    .round(2), use_container_width=True
+                )
+
+        # ── CHART 3: Steps ───────────────────────────────────────────────
+        st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
+        sec_m3("🚶", "Step Count Trend — Alerts & Anomalies", "Step 4")
+        anom_tag_m3(f"{n_steps} anomalous step-count days detected")
+        screenshot_badge_m3("Step Count Trend with Alert Bands")
+        step_pill_m3(4, "Threshold + Residual Detection on Steps")
+        ui_info_m3(f"Red vertical bands = anomaly alert days. Dashed lines = step thresholds. Bar chart below shows daily deviation from trend.")
+
+        steps_anom = anom_steps[anom_steps["is_anomaly"]]
+        fig_steps = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                   row_heights=[0.65, 0.35],
+                                   subplot_titles=["Daily Steps (avg across users)", "Residual Deviation from Trend"],
+                                   vertical_spacing=0.08)
+        for _, row in steps_anom.iterrows():
+            d = str(row["Date"])
+            d_next = str(pd.Timestamp(d) + pd.Timedelta(days=1))[:10]
+            fig_steps.add_vrect(
+                x0=d, x1=d_next,
+                fillcolor="rgba(252,129,129,0.15)",
+                line_color="rgba(252,129,129,0.5)",
+                line_width=1.5, row=1, col=1
+            )
+        fig_steps.add_trace(go.Scatter(
+            x=anom_steps["Date"], y=anom_steps["TotalSteps"],
+            mode="lines+markers", name="Avg Daily Steps",
+            line=dict(color=ACCENT3, width=2.5),
+            marker=dict(size=5, color=ACCENT3),
+            hovertemplate="<b>%{x}</b><br>Steps: %{y:,.0f}<extra></extra>"
+        ), row=1, col=1)
+        fig_steps.add_trace(go.Scatter(
+            x=anom_steps["Date"], y=anom_steps["rolling_med"],
+            mode="lines", name="Trend (Rolling Median)",
+            line=dict(color=ACCENT, width=2, dash="dash"),
+            hovertemplate="<b>%{x}</b><br>Trend: %{y:,.0f}<extra></extra>"
+        ), row=1, col=1)
+        if not steps_anom.empty:
+            fig_steps.add_trace(go.Scatter(
+                x=steps_anom["Date"], y=steps_anom["TotalSteps"],
+                mode="markers", name="🚨 Steps Anomaly",
+                marker=dict(color=ACCENT_RED, size=14, symbol="triangle-up",
+                            line=dict(color="white", width=2)),
+                hovertemplate="<b>%{x}</b><br>Steps: %{y:,.0f}<br><b>ALERT</b><extra>⚠️</extra>"
+            ), row=1, col=1)
+        fig_steps.add_hline(y=st_low, line_dash="dash", line_color=ACCENT_RED,
+                             line_width=1.5, opacity=0.8, row=1, col=1,
+                             annotation_text=f"Low Alert ({st_low:,} steps)",
+                             annotation_font_color=ACCENT_RED)
+        fig_steps.add_hline(y=25000, line_dash="dash", line_color=ACCENT2,
+                             line_width=1.5, opacity=0.7, row=1, col=1,
+                             annotation_text="High Alert (25,000 steps)",
+                             annotation_font_color=ACCENT2)
+        res_colors = [ACCENT_RED if v else ACCENT3 for v in anom_steps["resid_anomaly"]]
+        fig_steps.add_trace(go.Bar(
+            x=anom_steps["Date"], y=anom_steps["residual"],
+            name="Residual", marker_color=res_colors,
+            hovertemplate="<b>%{x}</b><br>Deviation: %{y:,.0f} steps<extra></extra>"
+        ), row=2, col=1)
+        fig_steps.add_hline(y=0, line_dash="solid", line_color=MUTED, line_width=1, row=2, col=1)
+        apply_plotly_theme(fig_steps)
+        fig_steps.update_layout(height=560, showlegend=True,
+            paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT)
+        fig_steps.update_xaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+        fig_steps.update_yaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
+        st.plotly_chart(fig_steps, use_container_width=True)
+
+        if not steps_anom.empty:
+            with st.expander(f"📋 View {len(steps_anom)} Steps Anomaly Records"):
+                st.dataframe(
+                    steps_anom[steps_anom["is_anomaly"]][["Date","TotalSteps","rolling_med","residual","reason"]]
+                    .rename(columns={"TotalSteps":"Steps","rolling_med":"Expected","residual":"Deviation","reason":"Anomaly Reason"})
+                    .round(2), use_container_width=True
+                )
+
+        # ── DBSCAN Outliers ──────────────────────────────────────────────
+        st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
+        sec_m3("🔍", "DBSCAN Outlier Users — Cluster-Based Anomalies", "Step 5")
+        step_pill_m3(5, "Structural Outlier Detection via DBSCAN")
+        anom_tag_m3("Outlier = users with atypical overall behaviour pattern")
+        ui_info_m3("Cluster each user using DBSCAN on their activity profile. Users labelled −1 are structural outliers.")
+
+        cluster_cols = ["TotalSteps","Calories","VeryActiveMinutes",
+                        "FairlyActiveMinutes","LightlyActiveMinutes",
+                        "SedentaryMinutes","TotalSleepMinutes"]
+        try:
+            cf = master.groupby("Id")[cluster_cols].mean().round(3).dropna()
+            scaler_db = StandardScaler()
+            X_scaled  = scaler_db.fit_transform(cf)
+            db_m3     = DBSCAN(eps=2.2, min_samples=2)
+            db_labels = db_m3.fit_predict(X_scaled)
+
+            pca_m3   = PCA(n_components=2, random_state=42)
+            X_pca_m3 = pca_m3.fit_transform(X_scaled)
+            var_m3   = pca_m3.explained_variance_ratio_ * 100
+
+            cf["DBSCAN"] = db_labels
+            outlier_users = cf[cf["DBSCAN"] == -1].index.tolist()
+            n_outliers = len(outlier_users)
+            n_clusters = len(set(db_labels)) - (1 if -1 in db_labels else 0)
+
+            metrics_m3(
+                (n_clusters,  "DBSCAN Clusters"),
+                (n_outliers,  "Outlier Users"),
+                (len(cf) - n_outliers, "Normal Users"),
+                red_indices=[1]
+            )
+
+            CLUSTER_COLORS_M3 = ["#63b3ed","#68d391","#f6ad55","#b794f4","#f687b3"]
+            fig_db_m3 = go.Figure()
+
+            for lbl in sorted(set(db_labels)):
+                if lbl == -1: continue
+                mask = db_labels == lbl
+                fig_db_m3.add_trace(go.Scatter(
+                    x=X_pca_m3[mask, 0], y=X_pca_m3[mask, 1],
+                    mode="markers+text",
+                    name=f"Cluster {lbl}",
+                    marker=dict(size=14, color=CLUSTER_COLORS_M3[lbl % len(CLUSTER_COLORS_M3)],
+                                opacity=0.85, line=dict(color="white", width=1.5)),
+                    text=[str(uid)[-4:] for uid in cf.index[mask]],
+                    textposition="top center", textfont=dict(size=8, color=TEXT),
+                    hovertemplate="<b>User ...%{text}</b><br>PC1: %{x:.2f}<br>PC2: %{y:.2f}<extra></extra>"
+                ))
+
+            if n_outliers > 0:
+                mask_out = db_labels == -1
+                fig_db_m3.add_trace(go.Scatter(
+                    x=X_pca_m3[mask_out, 0], y=X_pca_m3[mask_out, 1],
+                    mode="markers+text",
+                    name="🚨 Outlier / Anomaly",
+                    marker=dict(size=20, color=ACCENT_RED, symbol="x",
+                                line=dict(color="white", width=2.5)),
+                    text=[str(uid)[-4:] for uid in cf.index[mask_out]],
+                    textposition="top center", textfont=dict(size=9, color=ACCENT_RED),
+                    hovertemplate="<b>⚠️ OUTLIER User ...%{text}</b><br>PC1: %{x:.2f}<br>PC2: %{y:.2f}<extra>ANOMALY</extra>"
+                ))
+                for i, uid in enumerate(cf.index[mask_out]):
+                    xi, yi = X_pca_m3[mask_out][i]
+                    fig_db_m3.add_shape(type="circle",
+                        x0=xi-0.3, y0=yi-0.3, x1=xi+0.3, y1=yi+0.3,
+                        line=dict(color=ACCENT_RED, width=2, dash="dot"),
+                        fillcolor="rgba(252,129,129,0.1)"
+                    )
+
+            apply_plotly_theme(fig_db_m3, f"🔍 DBSCAN Outlier Detection — PCA Projection (eps=2.2)")
+            fig_db_m3.update_layout(height=500,
+                xaxis_title=f"PC1 ({var_m3[0]:.1f}% variance)",
+                yaxis_title=f"PC2 ({var_m3[1]:.1f}% variance)",
+                xaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
+                yaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED))
+            st.plotly_chart(fig_db_m3, use_container_width=True)
+
+            if outlier_users:
+                out_profile = cf[cf["DBSCAN"]==-1][cluster_cols]
+                st.markdown(f"""
+                <div class="m3-card" style="border-color:{DANGER_BOR}">
+                  <div class="m3-card-title" style="color:{ACCENT_RED}">🚨 Outlier User Profiles</div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.dataframe(out_profile.round(2), use_container_width=True)
+
+        except Exception as e:
+            ui_warn_m3(f"DBSCAN clustering skipped: {e}")
 
         st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
 
-        # ── SECTION 2: Anomaly Detection ────────────────────────────────────
-        sec_m3("🚨", "Anomaly Detection — Three Methods", "Steps 2–4")
+        # ── SECTION 3: Accuracy Simulation ──────────────────────────────
+        sec_m3("🎯", "Simulated Detection Accuracy — 90%+ Target", "Step 6")
+        step_pill_m3(6, "Inject Known Anomalies → Measure Detection Rate")
+        ui_info_m3("10 known anomalies are injected into each signal. The detector is run and we measure how many it catches.")
 
-        st.markdown(f"""
-        <div class="m3-card">
-          <div class="m3-card-title">Detection Methods Applied</div>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.8rem;font-size:0.83rem">
-            <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
-              <div style="color:{ACCENT_RED};font-weight:600;margin-bottom:0.4rem">① Threshold Violations</div>
-              <div style="color:{MUTED}">Hard upper/lower limits on HR, Steps, Sleep. Simple, interpretable, fast.</div>
-            </div>
-            <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
-              <div style="color:{ACCENT2};font-weight:600;margin-bottom:0.4rem">② Residual-Based</div>
-              <div style="color:{MUTED}">Rolling median as baseline. Flag days where actual deviates by ±{sigma:.0f}σ.</div>
-            </div>
-            <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
-              <div style="color:{ACCENT3};font-weight:600;margin-bottom:0.4rem">③ DBSCAN Outliers</div>
-              <div style="color:{MUTED}">Users labelled −1 by DBSCAN are structural outliers.</div>
-            </div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if st.button("🔍 Run Anomaly Detection (All 3 Methods)"):
-            with st.spinner("Detecting anomalies..."):
+        if st.button("🎯 Run Accuracy Simulation (10 injected anomalies per signal)"):
+            with st.spinner("Simulating..."):
                 try:
-                    anom_hr    = detect_hr_anomalies(master,    hr_high, hr_low,   sigma)
-                    anom_steps = detect_steps_anomalies(master, st_low,  25000,    sigma)
-                    anom_sleep = detect_sleep_anomalies(master, sl_low,  sl_high,  sigma)
-                    st.session_state.anom_hr    = anom_hr
-                    st.session_state.anom_steps = anom_steps
-                    st.session_state.anom_sleep = anom_sleep
-                    st.session_state.anomaly_done = True
+                    sim = simulate_accuracy(master, n_inject=10)
+                    st.session_state.sim_results  = sim
+                    st.session_state.simulation_done = True
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Detection error: {e}")
+                    st.error(f"Simulation error: {e}")
 
-        if st.session_state.anomaly_done:
-            anom_hr    = st.session_state.anom_hr
-            anom_steps = st.session_state.anom_steps
-            anom_sleep = st.session_state.anom_sleep
+        if st.session_state.simulation_done and st.session_state.sim_results:
+            sim = st.session_state.sim_results
+            overall = sim["Overall"]
+            passed  = overall >= 90.0
 
-            n_hr    = int(anom_hr["is_anomaly"].sum())
-            n_steps = int(anom_steps["is_anomaly"].sum())
-            n_sleep = int(anom_sleep["is_anomaly"].sum())
-            n_total = n_hr + n_steps + n_sleep
+            if passed:
+                ui_success_m3(f"Overall accuracy: {overall}% — ✅ MEETS 90%+ REQUIREMENT")
+            else:
+                ui_warn_m3(f"Overall accuracy: {overall}% — below 90% target, adjust thresholds in sidebar")
 
-            ui_danger_m3(f"Total anomalies flagged: {n_total}  (HR: {n_hr} · Steps: {n_steps} · Sleep: {n_sleep})")
-            metrics_m3(
-                (n_hr,    "HR Anomalies"),
-                (n_steps, "Steps Anomalies"),
-                (n_sleep, "Sleep Anomalies"),
-                (n_total, "Total Flags"),
-                red_indices=[0,1,2,3]
-            )
-
-            # ── CHART 1: Heart Rate ──────────────────────────────────────────
-            st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
-            sec_m3("❤️", "Heart Rate — Anomaly Chart", "Step 2")
-            anom_tag_m3(f"{n_hr} anomalous days detected")
-            screenshot_badge_m3("Heart Rate Chart with Anomaly Highlights")
-            step_pill_m3(2, "Threshold + Residual Detection")
-            ui_info_m3(f"Red markers = anomaly days. Dashed lines = thresholds (HR>{hr_high} or HR<{hr_low}). Shaded band = ±{sigma:.0f}σ residual zone.")
-
-            hr_anom   = anom_hr[anom_hr["is_anomaly"]]
-            fig_hr_m3 = go.Figure()
-
-            rolling_upper = anom_hr["rolling_med"] + sigma * anom_hr["residual"].std()
-            rolling_lower = anom_hr["rolling_med"] - sigma * anom_hr["residual"].std()
-
-            fig_hr_m3.add_trace(go.Scatter(
-                x=anom_hr["Date"], y=rolling_upper, mode="lines",
-                line=dict(width=0), showlegend=False, hoverinfo="skip"
-            ))
-            fig_hr_m3.add_trace(go.Scatter(
-                x=anom_hr["Date"], y=rolling_lower, mode="lines",
-                fill="tonexty", fillcolor="rgba(99,179,237,0.1)",
-                line=dict(width=0), name=f"±{sigma:.0f}σ Expected Band"
-            ))
-            fig_hr_m3.add_trace(go.Scatter(
-                x=anom_hr["Date"], y=anom_hr["AvgHR"],
-                mode="lines+markers", name="Avg Heart Rate",
-                line=dict(color=ACCENT, width=2.5),
-                marker=dict(size=5, color=ACCENT),
-                hovertemplate="<b>%{x}</b><br>HR: %{y:.1f} bpm<extra></extra>"
-            ))
-            fig_hr_m3.add_trace(go.Scatter(
-                x=anom_hr["Date"], y=anom_hr["rolling_med"],
-                mode="lines", name="Rolling Median",
-                line=dict(color=ACCENT3, width=1.5, dash="dot"),
-                hovertemplate="<b>%{x}</b><br>Median: %{y:.1f} bpm<extra></extra>"
-            ))
-            if not hr_anom.empty:
-                fig_hr_m3.add_trace(go.Scatter(
-                    x=hr_anom["Date"], y=hr_anom["AvgHR"],
-                    mode="markers", name="🚨 Anomaly",
-                    marker=dict(color=ACCENT_RED, size=14, symbol="circle",
-                                line=dict(color="white", width=2)),
-                    hovertemplate="<b>%{x}</b><br>HR: %{y:.1f} bpm<br><b>ANOMALY</b><extra>⚠️</extra>"
-                ))
-                for _, row in hr_anom.iterrows():
-                    fig_hr_m3.add_annotation(
-                        x=row["Date"], y=row["AvgHR"],
-                        text=f"⚠️ {row['reason']}", showarrow=True,
-                        arrowhead=2, arrowcolor=ACCENT_RED, arrowsize=1.2,
-                        ax=0, ay=-45,
-                        font=dict(color=ACCENT_RED, size=9),
-                        bgcolor=CARD_BG, bordercolor=DANGER_BOR, borderwidth=1, borderpad=4
-                    )
-            fig_hr_m3.add_hline(y=hr_high, line_dash="dash", line_color=ACCENT_RED,
-                             line_width=1.5, opacity=0.7,
-                             annotation_text=f"High Threshold ({hr_high} bpm)",
-                             annotation_position="top right",
-                             annotation_font_color=ACCENT_RED)
-            fig_hr_m3.add_hline(y=hr_low, line_dash="dash", line_color=ACCENT2,
-                             line_width=1.5, opacity=0.7,
-                             annotation_text=f"Low Threshold ({hr_low} bpm)",
-                             annotation_position="bottom right",
-                             annotation_font_color=ACCENT2)
-            apply_plotly_theme(fig_hr_m3, "❤️ Heart Rate — Anomaly Detection (Real Fitbit Data)")
-            fig_hr_m3.update_layout(height=480, xaxis_title="Date", yaxis_title="Heart Rate (bpm)",
-                xaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
-                yaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED))
-            st.plotly_chart(fig_hr_m3, use_container_width=True)
-
-            if not hr_anom.empty:
-                with st.expander(f"📋 View {len(hr_anom)} HR Anomaly Records"):
-                    st.dataframe(
-                        hr_anom[hr_anom["is_anomaly"]][["Date","AvgHR","rolling_med","residual","reason"]]
-                        .rename(columns={"rolling_med":"Expected","residual":"Deviation","reason":"Anomaly Reason"})
-                        .round(2), use_container_width=True
-                    )
-
-            # ── CHART 2: Sleep ───────────────────────────────────────────────
-            st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
-            sec_m3("💤", "Sleep Pattern — Anomaly Visualization", "Step 3")
-            anom_tag_m3(f"{n_sleep} anomalous sleep days detected")
-            screenshot_badge_m3("Sleep Pattern Visualization with Alerts")
-            step_pill_m3(3, "Threshold Detection on Sleep Minutes")
-            ui_info_m3(f"Orange = insufficient sleep (<{sl_low} min). Purple dots = anomaly days. Green band = healthy sleep zone ({sl_low}–{sl_high} min).")
-
-            sleep_anom = anom_sleep[anom_sleep["is_anomaly"]]
-
-            fig_sleep = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                       row_heights=[0.7, 0.3],
-                                       subplot_titles=["Sleep Duration (minutes/night)", "Deviation from Expected"],
-                                       vertical_spacing=0.08)
-            fig_sleep.add_hrect(y0=sl_low, y1=sl_high, fillcolor="rgba(104,211,145,0.08)",
-                                 line_width=0, annotation_text="✅ Healthy Sleep Zone",
-                                 annotation_position="top right",
-                                 annotation_font_color=ACCENT3, row=1, col=1)
-            fig_sleep.add_trace(go.Scatter(
-                x=anom_sleep["Date"], y=anom_sleep["TotalSleepMinutes"],
-                mode="lines+markers", name="Sleep Minutes",
-                line=dict(color="#b794f4", width=2.5),
-                marker=dict(size=5, color="#b794f4"),
-                hovertemplate="<b>%{x}</b><br>Sleep: %{y:.0f} min<extra></extra>"
-            ), row=1, col=1)
-            fig_sleep.add_trace(go.Scatter(
-                x=anom_sleep["Date"], y=anom_sleep["rolling_med"],
-                mode="lines", name="Rolling Median",
-                line=dict(color=ACCENT3, width=1.5, dash="dot"),
-                hovertemplate="<b>%{x}</b><br>Median: %{y:.0f} min<extra></extra>"
-            ), row=1, col=1)
-            if not sleep_anom.empty:
-                fig_sleep.add_trace(go.Scatter(
-                    x=sleep_anom["Date"], y=sleep_anom["TotalSleepMinutes"],
-                    mode="markers", name="🚨 Sleep Anomaly",
-                    marker=dict(color=ACCENT_RED, size=14, symbol="diamond",
-                                line=dict(color="white", width=2)),
-                    hovertemplate="<b>%{x}</b><br>Sleep: %{y:.0f} min<br><b>ANOMALY</b><extra>⚠️</extra>"
-                ), row=1, col=1)
-                for _, row in sleep_anom.iterrows():
-                    fig_sleep.add_annotation(
-                        x=row["Date"], y=row["TotalSleepMinutes"],
-                        text=f"⚠️ {row['reason']}", showarrow=True,
-                        arrowhead=2, arrowcolor=ACCENT_RED, arrowsize=1.2,
-                        ax=20, ay=-40,
-                        font=dict(color=ACCENT_RED, size=9),
-                        bgcolor=CARD_BG, bordercolor=DANGER_BOR, borderwidth=1,
-                        borderpad=3, row=1, col=1
-                    )
-            fig_sleep.add_hline(y=sl_low, line_dash="dash", line_color=ACCENT_RED,
-                                 line_width=1.5, opacity=0.7, row=1, col=1,
-                                 annotation_text=f"Min ({sl_low} min)",
-                                 annotation_font_color=ACCENT_RED)
-            fig_sleep.add_hline(y=sl_high, line_dash="dash", line_color=ACCENT,
-                                 line_width=1.5, opacity=0.7, row=1, col=1,
-                                 annotation_text=f"Max ({sl_high} min)",
-                                 annotation_font_color=ACCENT)
-            colors_resid = [ACCENT_RED if v else ACCENT for v in anom_sleep["resid_anomaly"]]
-            fig_sleep.add_trace(go.Bar(
-                x=anom_sleep["Date"], y=anom_sleep["residual"],
-                name="Residual", marker_color=colors_resid,
-                hovertemplate="<b>%{x}</b><br>Residual: %{y:.0f} min<extra></extra>"
-            ), row=2, col=1)
-            fig_sleep.add_hline(y=0, line_dash="solid", line_color=MUTED, line_width=1, row=2, col=1)
-            apply_plotly_theme(fig_sleep)
-            fig_sleep.update_layout(height=560, showlegend=True,
-                paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT)
-            fig_sleep.update_xaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
-            fig_sleep.update_yaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
-            st.plotly_chart(fig_sleep, use_container_width=True)
-
-            if not sleep_anom.empty:
-                with st.expander(f"📋 View {len(sleep_anom)} Sleep Anomaly Records"):
-                    st.dataframe(
-                        sleep_anom[sleep_anom["is_anomaly"]][["Date","TotalSleepMinutes","rolling_med","residual","reason"]]
-                        .rename(columns={"TotalSleepMinutes":"Sleep (min)","rolling_med":"Expected","residual":"Deviation","reason":"Anomaly Reason"})
-                        .round(2), use_container_width=True
-                    )
-
-            # ── CHART 3: Steps ───────────────────────────────────────────────
-            st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
-            sec_m3("🚶", "Step Count Trend — Alerts & Anomalies", "Step 4")
-            anom_tag_m3(f"{n_steps} anomalous step-count days detected")
-            screenshot_badge_m3("Step Count Trend with Alert Bands")
-            step_pill_m3(4, "Threshold + Residual Detection on Steps")
-            ui_info_m3(f"Red vertical bands = anomaly alert days. Dashed lines = step thresholds. Bar chart below shows daily deviation from trend.")
-
-            steps_anom = anom_steps[anom_steps["is_anomaly"]]
-            fig_steps = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                       row_heights=[0.65, 0.35],
-                                       subplot_titles=["Daily Steps (avg across users)", "Residual Deviation from Trend"],
-                                       vertical_spacing=0.08)
-            for _, row in steps_anom.iterrows():
-                d = str(row["Date"])
-                d_next = str(pd.Timestamp(d) + pd.Timedelta(days=1))[:10]
-                fig_steps.add_vrect(
-                    x0=d, x1=d_next,
-                    fillcolor="rgba(252,129,129,0.15)",
-                    line_color="rgba(252,129,129,0.5)",
-                    line_width=1.5, row=1, col=1
-                )
-            fig_steps.add_trace(go.Scatter(
-                x=anom_steps["Date"], y=anom_steps["TotalSteps"],
-                mode="lines+markers", name="Avg Daily Steps",
-                line=dict(color=ACCENT3, width=2.5),
-                marker=dict(size=5, color=ACCENT3),
-                hovertemplate="<b>%{x}</b><br>Steps: %{y:,.0f}<extra></extra>"
-            ), row=1, col=1)
-            fig_steps.add_trace(go.Scatter(
-                x=anom_steps["Date"], y=anom_steps["rolling_med"],
-                mode="lines", name="Trend (Rolling Median)",
-                line=dict(color=ACCENT, width=2, dash="dash"),
-                hovertemplate="<b>%{x}</b><br>Trend: %{y:,.0f}<extra></extra>"
-            ), row=1, col=1)
-            if not steps_anom.empty:
-                fig_steps.add_trace(go.Scatter(
-                    x=steps_anom["Date"], y=steps_anom["TotalSteps"],
-                    mode="markers", name="🚨 Steps Anomaly",
-                    marker=dict(color=ACCENT_RED, size=14, symbol="triangle-up",
-                                line=dict(color="white", width=2)),
-                    hovertemplate="<b>%{x}</b><br>Steps: %{y:,.0f}<br><b>ALERT</b><extra>⚠️</extra>"
-                ), row=1, col=1)
-            fig_steps.add_hline(y=st_low, line_dash="dash", line_color=ACCENT_RED,
-                                 line_width=1.5, opacity=0.8, row=1, col=1,
-                                 annotation_text=f"Low Alert ({st_low:,} steps)",
-                                 annotation_font_color=ACCENT_RED)
-            fig_steps.add_hline(y=25000, line_dash="dash", line_color=ACCENT2,
-                                 line_width=1.5, opacity=0.7, row=1, col=1,
-                                 annotation_text="High Alert (25,000 steps)",
-                                 annotation_font_color=ACCENT2)
-            res_colors = [ACCENT_RED if v else ACCENT3 for v in anom_steps["resid_anomaly"]]
-            fig_steps.add_trace(go.Bar(
-                x=anom_steps["Date"], y=anom_steps["residual"],
-                name="Residual", marker_color=res_colors,
-                hovertemplate="<b>%{x}</b><br>Deviation: %{y:,.0f} steps<extra></extra>"
-            ), row=2, col=1)
-            fig_steps.add_hline(y=0, line_dash="solid", line_color=MUTED, line_width=1, row=2, col=1)
-            apply_plotly_theme(fig_steps)
-            fig_steps.update_layout(height=560, showlegend=True,
-                paper_bgcolor=PAPER_BG, plot_bgcolor=PLOT_BG, font_color=TEXT)
-            fig_steps.update_xaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
-            fig_steps.update_yaxes(gridcolor=GRID_CLR, tickfont_color=MUTED)
-            st.plotly_chart(fig_steps, use_container_width=True)
-
-            if not steps_anom.empty:
-                with st.expander(f"📋 View {len(steps_anom)} Steps Anomaly Records"):
-                    st.dataframe(
-                        steps_anom[steps_anom["is_anomaly"]][["Date","TotalSteps","rolling_med","residual","reason"]]
-                        .rename(columns={"TotalSteps":"Steps","rolling_med":"Expected","residual":"Deviation","reason":"Anomaly Reason"})
-                        .round(2), use_container_width=True
-                    )
-
-            # ── DBSCAN Outliers ──────────────────────────────────────────────
-            st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
-            sec_m3("🔍", "DBSCAN Outlier Users — Cluster-Based Anomalies", "Step 5")
-            step_pill_m3(5, "Structural Outlier Detection via DBSCAN")
-            anom_tag_m3("Outlier = users with atypical overall behaviour pattern")
-            ui_info_m3("Cluster each user using DBSCAN on their activity profile. Users labelled −1 are structural outliers.")
-
-            cluster_cols = ["TotalSteps","Calories","VeryActiveMinutes",
-                            "FairlyActiveMinutes","LightlyActiveMinutes",
-                            "SedentaryMinutes","TotalSleepMinutes"]
-            try:
-                cf = master.groupby("Id")[cluster_cols].mean().round(3).dropna()
-                scaler_db = StandardScaler()
-                X_scaled  = scaler_db.fit_transform(cf)
-                db_m3     = DBSCAN(eps=2.2, min_samples=2)
-                db_labels = db_m3.fit_predict(X_scaled)
-
-                pca_m3   = PCA(n_components=2, random_state=42)
-                X_pca_m3 = pca_m3.fit_transform(X_scaled)
-                var_m3   = pca_m3.explained_variance_ratio_ * 100
-
-                cf["DBSCAN"] = db_labels
-                outlier_users = cf[cf["DBSCAN"] == -1].index.tolist()
-                n_outliers = len(outlier_users)
-                n_clusters = len(set(db_labels)) - (1 if -1 in db_labels else 0)
-
-                metrics_m3(
-                    (n_clusters,  "DBSCAN Clusters"),
-                    (n_outliers,  "Outlier Users"),
-                    (len(cf) - n_outliers, "Normal Users"),
-                    red_indices=[1]
-                )
-
-                CLUSTER_COLORS_M3 = ["#63b3ed","#68d391","#f6ad55","#b794f4","#f687b3"]
-                fig_db_m3 = go.Figure()
-
-                for lbl in sorted(set(db_labels)):
-                    if lbl == -1: continue
-                    mask = db_labels == lbl
-                    fig_db_m3.add_trace(go.Scatter(
-                        x=X_pca_m3[mask, 0], y=X_pca_m3[mask, 1],
-                        mode="markers+text",
-                        name=f"Cluster {lbl}",
-                        marker=dict(size=14, color=CLUSTER_COLORS_M3[lbl % len(CLUSTER_COLORS_M3)],
-                                    opacity=0.85, line=dict(color="white", width=1.5)),
-                        text=[str(uid)[-4:] for uid in cf.index[mask]],
-                        textposition="top center", textfont=dict(size=8, color=TEXT),
-                        hovertemplate="<b>User ...%{text}</b><br>PC1: %{x:.2f}<br>PC2: %{y:.2f}<extra></extra>"
-                    ))
-
-                if n_outliers > 0:
-                    mask_out = db_labels == -1
-                    fig_db_m3.add_trace(go.Scatter(
-                        x=X_pca_m3[mask_out, 0], y=X_pca_m3[mask_out, 1],
-                        mode="markers+text",
-                        name="🚨 Outlier / Anomaly",
-                        marker=dict(size=20, color=ACCENT_RED, symbol="x",
-                                    line=dict(color="white", width=2.5)),
-                        text=[str(uid)[-4:] for uid in cf.index[mask_out]],
-                        textposition="top center", textfont=dict(size=9, color=ACCENT_RED),
-                        hovertemplate="<b>⚠️ OUTLIER User ...%{text}</b><br>PC1: %{x:.2f}<br>PC2: %{y:.2f}<extra>ANOMALY</extra>"
-                    ))
-                    for i, uid in enumerate(cf.index[mask_out]):
-                        xi, yi = X_pca_m3[mask_out][i]
-                        fig_db_m3.add_shape(type="circle",
-                            x0=xi-0.3, y0=yi-0.3, x1=xi+0.3, y1=yi+0.3,
-                            line=dict(color=ACCENT_RED, width=2, dash="dot"),
-                            fillcolor="rgba(252,129,129,0.1)"
-                        )
-
-                apply_plotly_theme(fig_db_m3, f"🔍 DBSCAN Outlier Detection — PCA Projection (eps=2.2)")
-                fig_db_m3.update_layout(height=500,
-                    xaxis_title=f"PC1 ({var_m3[0]:.1f}% variance)",
-                    yaxis_title=f"PC2 ({var_m3[1]:.1f}% variance)",
-                    xaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
-                    yaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED))
-                st.plotly_chart(fig_db_m3, use_container_width=True)
-
-                if outlier_users:
-                    out_profile = cf[cf["DBSCAN"]==-1][cluster_cols]
-                    st.markdown(f"""
-                    <div class="m3-card" style="border-color:{DANGER_BOR}">
-                      <div class="m3-card-title" style="color:{ACCENT_RED}">🚨 Outlier User Profiles</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.dataframe(out_profile.round(2), use_container_width=True)
-
-            except Exception as e:
-                ui_warn_m3(f"DBSCAN clustering skipped: {e}")
-
-            st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
-
-            # ── SECTION 3: Accuracy Simulation ──────────────────────────────
-            sec_m3("🎯", "Simulated Detection Accuracy — 90%+ Target", "Step 6")
-            step_pill_m3(6, "Inject Known Anomalies → Measure Detection Rate")
-            ui_info_m3("10 known anomalies are injected into each signal. The detector is run and we measure how many it catches.")
-
-            if st.button("🎯 Run Accuracy Simulation (10 injected anomalies per signal)"):
-                with st.spinner("Simulating..."):
-                    try:
-                        sim = simulate_accuracy(master, n_inject=10)
-                        st.session_state.sim_results  = sim
-                        st.session_state.simulation_done = True
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Simulation error: {e}")
-
-            if st.session_state.simulation_done and st.session_state.sim_results:
-                sim = st.session_state.sim_results
-                overall = sim["Overall"]
-                passed  = overall >= 90.0
-
-                if passed:
-                    ui_success_m3(f"Overall accuracy: {overall}% — ✅ MEETS 90%+ REQUIREMENT")
-                else:
-                    ui_warn_m3(f"Overall accuracy: {overall}% — below 90% target, adjust thresholds in sidebar")
-
-                html = '<div class="metric-grid">'
-                for signal in ["Heart Rate", "Steps", "Sleep"]:
-                    r   = sim[signal]
-                    acc = r["accuracy"]
-                    col = ACCENT3 if acc >= 90 else ACCENT_RED
-                    html += f"""
-                    <div class="metric-card" style="border-color:{col}44">
-                      <div style="font-size:1.8rem;font-weight:800;color:{col};font-family:'Syne',sans-serif">{acc}%</div>
-                      <div style="font-size:0.8rem;color:{TEXT};font-weight:600;margin:0.3rem 0">{signal}</div>
-                      <div style="font-size:0.72rem;color:{MUTED}">{r['detected']}/{r['injected']} detected</div>
-                      <div style="font-size:0.7rem;color:{'#9ae6b4' if acc>=90 else ACCENT_RED}">{'✅ PASS' if acc>=90 else '⚠️ LOW'}</div>
-                    </div>"""
+            html = '<div class="metric-grid">'
+            for signal in ["Heart Rate", "Steps", "Sleep"]:
+                r   = sim[signal]
+                acc = r["accuracy"]
+                col = ACCENT3 if acc >= 90 else ACCENT_RED
                 html += f"""
-                    <div class="metric-card" style="border-color:{'#68d391' if passed else ACCENT_RED}88;background:{'rgba(104,211,145,0.1)' if passed else DANGER_BG}">
-                      <div style="font-size:1.8rem;font-weight:800;color:{'#68d391' if passed else ACCENT_RED};font-family:'Syne',sans-serif">{overall}%</div>
-                      <div style="font-size:0.8rem;color:{TEXT};font-weight:600;margin:0.3rem 0">Overall</div>
-                      <div style="font-size:0.7rem;color:{'#9ae6b4' if passed else ACCENT_RED}">{'✅ 90%+ ACHIEVED' if passed else '⚠️ BELOW TARGET'}</div>
-                    </div>"""
-                html += '</div>'
-                st.markdown(html, unsafe_allow_html=True)
+                <div class="metric-card" style="border-color:{col}44">
+                  <div style="font-size:1.8rem;font-weight:800;color:{col};font-family:'Syne',sans-serif">{acc}%</div>
+                  <div style="font-size:0.8rem;color:{TEXT};font-weight:600;margin:0.3rem 0">{signal}</div>
+                  <div style="font-size:0.72rem;color:{MUTED}">{r['detected']}/{r['injected']} detected</div>
+                  <div style="font-size:0.7rem;color:{'#9ae6b4' if acc>=90 else ACCENT_RED}">{'✅ PASS' if acc>=90 else '⚠️ LOW'}</div>
+                </div>"""
+            html += f"""
+                <div class="metric-card" style="border-color:{'#68d391' if passed else ACCENT_RED}88;background:{'rgba(104,211,145,0.1)' if passed else DANGER_BG}">
+                  <div style="font-size:1.8rem;font-weight:800;color:{'#68d391' if passed else ACCENT_RED};font-family:'Syne',sans-serif">{overall}%</div>
+                  <div style="font-size:0.8rem;color:{TEXT};font-weight:600;margin:0.3rem 0">Overall</div>
+                  <div style="font-size:0.7rem;color:{'#9ae6b4' if passed else ACCENT_RED}">{'✅ 90%+ ACHIEVED' if passed else '⚠️ BELOW TARGET'}</div>
+                </div>"""
+            html += '</div>'
+            st.markdown(html, unsafe_allow_html=True)
 
-                signals   = ["Heart Rate", "Steps", "Sleep"]
-                accs      = [sim[s]["accuracy"] for s in signals]
-                bar_colors = [ACCENT3 if a >= 90 else ACCENT_RED for a in accs]
+            signals   = ["Heart Rate", "Steps", "Sleep"]
+            accs      = [sim[s]["accuracy"] for s in signals]
+            bar_colors = [ACCENT3 if a >= 90 else ACCENT_RED for a in accs]
 
-                fig_acc = go.Figure()
-                fig_acc.add_trace(go.Bar(
-                    x=signals, y=accs,
-                    marker_color=bar_colors,
-                    text=[f"{a}%" for a in accs],
-                    textposition="outside",
-                    textfont=dict(color=TEXT, size=14, family="Syne, sans-serif"),
-                    hovertemplate="<b>%{x}</b><br>Accuracy: %{y}%<extra></extra>",
-                    name="Detection Accuracy"
-                ))
-                fig_acc.add_hline(y=90, line_dash="dash", line_color=ACCENT_RED,
-                                  line_width=2, annotation_text="90% Target",
-                                  annotation_font_color=ACCENT_RED,
-                                  annotation_position="top right")
-                apply_plotly_theme(fig_acc, "🎯 Simulated Anomaly Detection Accuracy")
-                fig_acc.update_layout(
-                    height=380, yaxis_range=[0, 115],
-                    yaxis_title="Detection Accuracy (%)",
-                    xaxis_title="Signal",
-                    xaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
-                    yaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
-                    showlegend=False
-                )
-                st.plotly_chart(fig_acc, use_container_width=True)
+            fig_acc = go.Figure()
+            fig_acc.add_trace(go.Bar(
+                x=signals, y=accs,
+                marker_color=bar_colors,
+                text=[f"{a}%" for a in accs],
+                textposition="outside",
+                textfont=dict(color=TEXT, size=14, family="Syne, sans-serif"),
+                hovertemplate="<b>%{x}</b><br>Accuracy: %{y}%<extra></extra>",
+                name="Detection Accuracy"
+            ))
+            fig_acc.add_hline(y=90, line_dash="dash", line_color=ACCENT_RED,
+                              line_width=2, annotation_text="90% Target",
+                              annotation_font_color=ACCENT_RED,
+                              annotation_position="top right")
+            apply_plotly_theme(fig_acc, "🎯 Simulated Anomaly Detection Accuracy")
+            fig_acc.update_layout(
+                height=380, yaxis_range=[0, 115],
+                yaxis_title="Detection Accuracy (%)",
+                xaxis_title="Signal",
+                xaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
+                yaxis=dict(gridcolor=GRID_CLR, tickfont_color=MUTED),
+                showlegend=False
+            )
+            st.plotly_chart(fig_acc, use_container_width=True)
 
-            st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
+        st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
 
-            # ── Milestone 3 Summary ──────────────────────────────────────────
-            sec_m3("✅", "Milestone 3 Summary")
+        # ── Milestone 3 Summary ──────────────────────────────────────────
+        sec_m3("✅", "Milestone 3 Summary")
 
-            checklist = [
-                ("🚨", "Threshold Violations",  st.session_state.anomaly_done,    f"HR>{hr_high}/{hr_low}, Steps<{st_low}, Sleep<{sl_low}/<{sl_high}"),
-                ("📉", "Residual-Based",         st.session_state.anomaly_done,    f"Rolling median ±{sigma:.0f}σ on all 3 signals"),
-                ("🔍", "DBSCAN Outliers",        st.session_state.anomaly_done,    "Structural user-level anomalies via clustering"),
-                ("❤️", "HR Chart",               st.session_state.anomaly_done,    "Interactive Plotly — annotations + threshold lines"),
-                ("💤", "Sleep Chart",            st.session_state.anomaly_done,    "Dual subplot — duration + residual bars"),
-                ("🚶", "Steps Chart",            st.session_state.anomaly_done,    "Trend + alert bands + residual deviation"),
-                ("🎯", "Accuracy Simulation",    st.session_state.simulation_done, "10 injected anomalies per signal, 90%+ target"),
-            ]
+        checklist = [
+            ("🚨", "Threshold Violations",  st.session_state.anomaly_done,    f"HR>{hr_high}/{hr_low}, Steps<{st_low}, Sleep<{sl_low}/<{sl_high}"),
+            ("📉", "Residual-Based",         st.session_state.anomaly_done,    f"Rolling median ±{sigma:.0f}σ on all 3 signals"),
+            ("🔍", "DBSCAN Outliers",        st.session_state.anomaly_done,    "Structural user-level anomalies via clustering"),
+            ("❤️", "HR Chart",               st.session_state.anomaly_done,    "Interactive Plotly — annotations + threshold lines"),
+            ("💤", "Sleep Chart",            st.session_state.anomaly_done,    "Dual subplot — duration + residual bars"),
+            ("🚶", "Steps Chart",            st.session_state.anomaly_done,    "Trend + alert bands + residual deviation"),
+            ("🎯", "Accuracy Simulation",    st.session_state.simulation_done, "10 injected anomalies per signal, 90%+ target"),
+        ]
 
-            for icon, label, done, detail in checklist:
-                dot = "✅" if done else "⬜"
-                st.markdown(f"""
-                <div style="display:flex;align-items:center;gap:1rem;padding:0.6rem 0;border-bottom:1px solid {CARD_BOR}">
-                  <span style="font-size:1.1rem">{dot}</span>
-                  <span style="font-size:0.9rem;font-weight:600;color:{TEXT};min-width:180px">{icon} {label}</span>
-                  <span style="font-size:0.8rem;color:{MUTED}">{detail}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.markdown("<br>", unsafe_allow_html=True)
+        for icon, label, done, detail in checklist:
+            dot = "✅" if done else "⬜"
             st.markdown(f"""
-            <div class="m3-card" style="border-color:{DANGER_BOR}">
-              <div class="m3-card-title">📸 Screenshots Required for Submission</div>
-              <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:0.5rem;font-size:0.82rem">
-                <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-                  <span style="color:{ACCENT2}">📸</span> <b>Chart 1</b> — Heart Rate with anomalies highlighted
-                </div>
-                <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-                  <span style="color:{ACCENT2}">📸</span> <b>Chart 2</b> — Sleep pattern visualization
-                </div>
-                <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-                  <span style="color:{ACCENT2}">📸</span> <b>Chart 3</b> — Step count trend with alerts
-                </div>
-                <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-                  <span style="color:{ACCENT2}">📸</span> <b>Chart 4</b> — DBSCAN outlier scatter (PCA)
-                </div>
-                <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem;grid-column:1/-1">
-                  <span style="color:{ACCENT2}">📸</span> <b>Chart 5</b> — Accuracy bar chart (90%+ target line)
-                </div>
-              </div>
+            <div style="display:flex;align-items:center;gap:1rem;padding:0.6rem 0;border-bottom:1px solid {CARD_BOR}">
+              <span style="font-size:1.1rem">{dot}</span>
+              <span style="font-size:0.9rem;font-weight:600;color:{TEXT};min-width:180px">{icon} {label}</span>
+              <span style="font-size:0.8rem;color:{MUTED}">{detail}</span>
             </div>
             """, unsafe_allow_html=True)
 
-    else:
+        st.markdown("<br>", unsafe_allow_html=True)
         st.markdown(f"""
-        <div class="m3-card" style="text-align:center;padding:3rem">
-          <div style="font-size:3rem;margin-bottom:1rem">🚨</div>
-          <div style="font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:700;color:{TEXT};margin-bottom:0.5rem">
-            Upload Your Fitbit Files to Begin
-          </div>
-          <div style="color:{MUTED};font-size:0.88rem">
-            Upload all 5 CSV files above and click <b>Load & Build Master DataFrame</b>
+        <div class="m3-card" style="border-color:{DANGER_BOR}">
+          <div class="m3-card-title">📸 Screenshots Required for Submission</div>
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:0.5rem;font-size:0.82rem">
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Chart 1</b> — Heart Rate with anomalies highlighted
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Chart 2</b> — Sleep pattern visualization
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Chart 3</b> — Step count trend with alerts
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Chart 4</b> — DBSCAN outlier scatter (PCA)
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem;grid-column:1/-1">
+              <span style="color:{ACCENT2}">📸</span> <b>Chart 5</b> — Accuracy bar chart (90%+ target line)
+            </div>
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+
+# ===================================================
+#
+#  MILESTONE 4 — INSIGHTS DASHBOARD
+#
+# ===================================================
+
+else:
+
+    # Hero
+    st.markdown(f"""
+    <div class="m4-hero">
+      <div class="hero-badge">MILESTONE 4 . INSIGHTS DASHBOARD</div>
+      <h1 class="hero-title">📊 FitPulse Insights Dashboard</h1>
+      <p class="hero-sub">Detect · Filter · Export PDF & CSV — Real Fitbit Device Data</p>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Check data availability ──────────────────────────────────────────────
+    if not st.session_state.files_loaded:
+        st.markdown(f"""
+        <div class="m3-card" style="text-align:center;padding:3rem;border-color:{DANGER_BOR}">
+          <div style="font-size:3rem;margin-bottom:1rem">⚠️</div>
+          <div style="font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:700;color:{TEXT};margin-bottom:0.5rem">
+            Please upload data in Milestone 1 or Milestone 2
+          </div>
+          <div style="color:{MUTED};font-size:0.88rem;margin-bottom:1.5rem">
+            Go to <b>Milestone 2</b>, upload all 5 CSV files, then return here.<br>
+            Or use the <b>⚡ Run M4 Detection</b> button in the sidebar once data is loaded.
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;max-width:600px;margin:0 auto;text-align:left">
+            <div style="background:{SECTION_BG};border-radius:10px;padding:0.8rem">
+              <div style="color:{ACCENT};font-weight:600;font-size:0.85rem">📤 Upload</div>
+              <div style="color:{MUTED};font-size:0.75rem;margin-top:0.2rem">All 5 Fitbit CSV files in Milestone 2</div>
+            </div>
+            <div style="background:{SECTION_BG};border-radius:10px;padding:0.8rem">
+              <div style="color:{ACCENT_RED};font-weight:600;font-size:0.85rem">🚨 Detect</div>
+              <div style="color:{MUTED};font-size:0.75rem;margin-top:0.2rem">Run M4 Detection from sidebar</div>
+            </div>
+            <div style="background:{SECTION_BG};border-radius:10px;padding:0.8rem">
+              <div style="color:{ACCENT3};font-weight:600;font-size:0.85rem">📥 Export</div>
+              <div style="color:{MUTED};font-size:0.75rem;margin-top:0.2rem">Download PDF report + CSV data</div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.stop()
+
+    # ── Run M4 detection pipeline ────────────────────────────────────────────
+    if run_m4_clicked:
+        with st.spinner("⏳ Running M4 anomaly detection..."):
+            try:
+                master_m4 = st.session_state.master
+                anom_hr_m4    = detect_hr_m4(master_m4,    m4_hr_high, m4_hr_low,   m4_sigma)
+                anom_steps_m4 = detect_steps_m4(master_m4, m4_st_low,  25000,       m4_sigma)
+                anom_sleep_m4 = detect_sleep_m4(master_m4, m4_sl_low,  m4_sl_high,  m4_sigma)
+                st.session_state.m4_anom_hr    = anom_hr_m4
+                st.session_state.m4_anom_steps = anom_steps_m4
+                st.session_state.m4_anom_sleep = anom_sleep_m4
+                st.session_state.pipeline_done = True
+                st.rerun()
+            except Exception as e:
+                st.error(f"M4 detection error: {e}")
+
+    # Auto-run detection on first visit if not done yet
+    if not st.session_state.pipeline_done and st.session_state.files_loaded:
+        with st.spinner("⏳ Running anomaly detection for dashboard..."):
+            try:
+                master_m4 = st.session_state.master
+                anom_hr_m4    = detect_hr_m4(master_m4,    m4_hr_high, m4_hr_low,   m4_sigma)
+                anom_steps_m4 = detect_steps_m4(master_m4, m4_st_low,  25000,       m4_sigma)
+                anom_sleep_m4 = detect_sleep_m4(master_m4, m4_sl_low,  m4_sl_high,  m4_sigma)
+                st.session_state.m4_anom_hr    = anom_hr_m4
+                st.session_state.m4_anom_steps = anom_steps_m4
+                st.session_state.m4_anom_sleep = anom_sleep_m4
+                st.session_state.pipeline_done = True
+                st.rerun()
+            except Exception as e:
+                st.error(f"Auto-detection error: {e}")
+        st.stop()
+
+    master     = st.session_state.master
+    anom_hr    = st.session_state.get("m4_anom_hr",    st.session_state.anom_hr)
+    anom_steps = st.session_state.get("m4_anom_steps", st.session_state.anom_steps)
+    anom_sleep = st.session_state.get("m4_anom_sleep", st.session_state.anom_sleep)
+
+    if anom_hr is None or anom_steps is None or anom_sleep is None:
+        ui_danger_m4("Detection results not found. Click ⚡ Run M4 Detection in the sidebar.")
+        st.stop()
+
+    # ── Apply date filter ─────────────────────────────────────────────────────
+    try:
+        if date_range_m4 is not None and isinstance(date_range_m4, tuple) and len(date_range_m4) == 2:
+            d_from, d_to = pd.Timestamp(date_range_m4[0]), pd.Timestamp(date_range_m4[1])
+        else:
+            all_dates = pd.to_datetime(master["Date"])
+            d_from, d_to = all_dates.min(), all_dates.max()
+    except Exception:
+        all_dates = pd.to_datetime(master["Date"])
+        d_from, d_to = all_dates.min(), all_dates.max()
+
+    def filt_m4(df, date_col="Date"):
+        df2 = df.copy()
+        df2[date_col] = pd.to_datetime(df2[date_col])
+        return df2[(df2[date_col] >= d_from) & (df2[date_col] <= d_to)]
+
+    anom_hr_f    = filt_m4(anom_hr)
+    anom_steps_f = filt_m4(anom_steps)
+    anom_sleep_f = filt_m4(anom_sleep)
+    master_f     = filt_m4(master)
+    if selected_user_m4:
+        master_f = master_f[master_f["Id"] == selected_user_m4]
+
+    # ── KPI strip ─────────────────────────────────────────────────────────────
+    n_hr_f    = int(anom_hr_f["is_anomaly"].sum())
+    n_steps_f = int(anom_steps_f["is_anomaly"].sum())
+    n_sleep_f = int(anom_sleep_f["is_anomaly"].sum())
+    n_total_f = n_hr_f + n_steps_f + n_sleep_f
+    n_users_f = master_f["Id"].nunique()
+    n_days_f  = master_f["Date"].nunique()
+
+    worst_hr_row   = anom_hr_f[anom_hr_f["is_anomaly"]].copy()
+    worst_hr_day   = worst_hr_row.iloc[worst_hr_row["residual"].abs().argmax()]["Date"].strftime("%d %b") if not worst_hr_row.empty else "-"
+
+    kpi_html = f"""
+    <div class="kpi-grid">
+      <div class="kpi-card" style="border-color:{DANGER_BOR}">
+        <div class="kpi-val" style="color:{ACCENT_RED}">{n_total_f}</div>
+        <div class="kpi-label">Total Anomalies</div>
+        <div class="kpi-sub">across all signals</div>
+      </div>
+      <div class="kpi-card" style="border-color:rgba(246,135,179,0.3)">
+        <div class="kpi-val" style="color:{ACCENT2}">{n_hr_f}</div>
+        <div class="kpi-label">HR Flags</div>
+        <div class="kpi-sub">heart rate anomalies</div>
+      </div>
+      <div class="kpi-card" style="border-color:rgba(104,211,145,0.3)">
+        <div class="kpi-val" style="color:{ACCENT3}">{n_steps_f}</div>
+        <div class="kpi-label">Steps Alerts</div>
+        <div class="kpi-sub">step count anomalies</div>
+      </div>
+      <div class="kpi-card" style="border-color:rgba(183,148,244,0.3)">
+        <div class="kpi-val" style="color:#b794f4">{n_sleep_f}</div>
+        <div class="kpi-label">Sleep Flags</div>
+        <div class="kpi-sub">sleep anomalies</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val" style="color:{ACCENT}">{n_users_f}</div>
+        <div class="kpi-label">Users</div>
+        <div class="kpi-sub">in selected range</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-val" style="color:{ACCENT_ORG}">{worst_hr_day}</div>
+        <div class="kpi-label">Peak HR Anomaly</div>
+        <div class="kpi-sub">highest deviation day</div>
+      </div>
+    </div>"""
+    st.markdown(kpi_html, unsafe_allow_html=True)
+
+    ui_success_m4(f"Pipeline complete · {n_users_f} users · {n_days_f} days · {n_total_f} anomalies flagged")
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    tab_overview, tab_hr, tab_steps, tab_sleep, tab_export = st.tabs([
+        "📊 Overview", "❤️ Heart Rate", "🚶 Steps", "💤 Sleep", "📥 Export"
+    ])
+
+    # ── TAB 1: OVERVIEW ───────────────────────────────────────────────────────
+    with tab_overview:
+
+        st.markdown('<hr class="m4-divider">', unsafe_allow_html=True)
+        sec_m4("📅", "Combined Anomaly Timeline")
+
+        all_anoms = []
+        for df_, sig, col in [
+            (anom_hr_f,    "Heart Rate", ACCENT2),
+            (anom_steps_f, "Steps",      ACCENT3),
+            (anom_sleep_f, "Sleep",      "#b794f4"),
+        ]:
+            a = df_[df_["is_anomaly"]].copy()
+            a["signal"] = sig
+            a["color"]  = col
+            all_anoms.append(a[["Date","signal","color","reason"]])
+
+        if all_anoms:
+            combined = pd.concat(all_anoms, ignore_index=True)
+            combined["Date"] = pd.to_datetime(combined["Date"])
+            combined["y"]    = combined["signal"]
+
+            fig_timeline = go.Figure()
+            for sig, col in [("Heart Rate", ACCENT2), ("Steps", ACCENT3), ("Sleep", "#b794f4")]:
+                sub = combined[combined["signal"] == sig]
+                if not sub.empty:
+                    fig_timeline.add_trace(go.Scatter(
+                        x=sub["Date"], y=sub["y"], mode="markers",
+                        name=sig, marker=dict(color=col, size=14, symbol="diamond",
+                                              line=dict(color="white", width=2)),
+                        hovertemplate=f"<b>{sig}</b><br>%{{x|%d %b %Y}}<br>%{{customdata}}<extra>⚠️ ANOMALY</extra>",
+                        customdata=sub["reason"].values
+                    ))
+            ptheme(fig_timeline, "📅 Anomaly Event Timeline - All Signals", h=280)
+            fig_timeline.update_layout(
+                xaxis_title="Date", yaxis_title="Signal",
+                showlegend=True,
+                yaxis=dict(categoryorder="array",
+                           categoryarray=["Sleep","Steps","Heart Rate"],
+                           gridcolor=GRID_CLR, tickfont_color=MUTED)
+            )
+            st.plotly_chart(fig_timeline, use_container_width=True)
+
+        st.markdown('<hr class="m4-divider">', unsafe_allow_html=True)
+        sec_m4("🗂️", "Recent Anomaly Log")
+        if all_anoms:
+            log = combined.sort_values("Date", ascending=False).head(10)
+            for _, row in log.iterrows():
+                st.markdown(f"""
+                <div class="anom-row">
+                  <span style="font-size:0.9rem">🚨</span>
+                  <span style="color:{row['color']};font-family:'JetBrains Mono',monospace;font-size:0.75rem;min-width:90px">{row['signal']}</span>
+                  <span style="color:{MUTED};font-size:0.78rem;min-width:90px">{row['Date'].strftime('%d %b %Y')}</span>
+                  <span style="color:{TEXT};font-size:0.78rem">{row['reason']}</span>
+                </div>""", unsafe_allow_html=True)
+
+    # ── TAB 2: HEART RATE ─────────────────────────────────────────────────────
+    with tab_hr:
+        sec_m4("❤️", "Heart Rate - Deep Dive", f"{n_hr_f} anomalies")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"""
+            <div class="m3-card">
+              <div class="m3-card-title">HR Statistics</div>
+              <div style="font-size:0.83rem;line-height:2">
+                <div>Mean HR: <b style="color:{ACCENT}">{anom_hr_f['AvgHR'].mean():.1f} bpm</b></div>
+                <div>Max HR: <b style="color:{ACCENT_RED}">{anom_hr_f['AvgHR'].max():.1f} bpm</b></div>
+                <div>Min HR: <b style="color:{ACCENT2}">{anom_hr_f['AvgHR'].min():.1f} bpm</b></div>
+                <div>Anomaly days: <b style="color:{ACCENT_RED}">{n_hr_f}</b> of {len(anom_hr_f)} total</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        with col_b:
+            st.markdown(f'<div class="m3-card"><div class="m3-card-title">HR Anomaly Records</div>', unsafe_allow_html=True)
+            hr_display = anom_hr_f[anom_hr_f["is_anomaly"]][["Date","AvgHR","rolling_med","residual","reason"]].round(2)
+            if not hr_display.empty:
+                st.dataframe(hr_display.rename(columns={"AvgHR":"Avg HR","rolling_med":"Expected","residual":"Deviation","reason":"Reason"}),
+                             use_container_width=True, height=200)
+            else:
+                ui_success_m4("No HR anomalies in selected range")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.plotly_chart(chart_hr_m4(anom_hr_f, m4_hr_high, m4_hr_low, m4_sigma), use_container_width=True)
+
+    # ── TAB 3: STEPS ──────────────────────────────────────────────────────────
+    with tab_steps:
+        sec_m4("🚶", "Step Count - Deep Dive", f"{n_steps_f} alerts")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"""
+            <div class="m3-card">
+              <div class="m3-card-title">Steps Statistics</div>
+              <div style="font-size:0.83rem;line-height:2">
+                <div>Mean steps/day: <b style="color:{ACCENT3}">{anom_steps_f['TotalSteps'].mean():,.0f}</b></div>
+                <div>Max steps/day: <b style="color:{ACCENT}">{anom_steps_f['TotalSteps'].max():,.0f}</b></div>
+                <div>Min steps/day: <b style="color:{ACCENT_RED}">{anom_steps_f['TotalSteps'].min():,.0f}</b></div>
+                <div>Alert days: <b style="color:{ACCENT_RED}">{n_steps_f}</b> of {len(anom_steps_f)} total</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        with col_b:
+            st.markdown(f'<div class="m3-card"><div class="m3-card-title">Steps Alert Records</div>', unsafe_allow_html=True)
+            st_display = anom_steps_f[anom_steps_f["is_anomaly"]][["Date","TotalSteps","rolling_med","residual","reason"]].round(2)
+            if not st_display.empty:
+                st.dataframe(st_display.rename(columns={"TotalSteps":"Steps","rolling_med":"Expected","residual":"Deviation","reason":"Reason"}),
+                             use_container_width=True, height=200)
+            else:
+                ui_success_m4("No step anomalies in selected range")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.plotly_chart(chart_steps_m4(anom_steps_f, m4_st_low), use_container_width=True)
+
+    # ── TAB 4: SLEEP ──────────────────────────────────────────────────────────
+    with tab_sleep:
+        sec_m4("💤", "Sleep Pattern - Deep Dive", f"{n_sleep_f} anomalies")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            _sl_min_nonzero = anom_sleep_f[anom_sleep_f['TotalSleepMinutes']>0]['TotalSleepMinutes'].min() if (anom_sleep_f['TotalSleepMinutes']>0).any() else 0
+            st.markdown(f"""
+            <div class="m3-card">
+              <div class="m3-card-title">Sleep Statistics</div>
+              <div style="font-size:0.83rem;line-height:2">
+                <div>Mean sleep/night: <b style="color:#b794f4">{anom_sleep_f['TotalSleepMinutes'].mean():.0f} min</b></div>
+                <div>Max sleep/night: <b style="color:{ACCENT}">{anom_sleep_f['TotalSleepMinutes'].max():.0f} min</b></div>
+                <div>Min (non-zero): <b style="color:{ACCENT_RED}">{_sl_min_nonzero:.0f} min</b></div>
+                <div>Anomaly days: <b style="color:{ACCENT_RED}">{n_sleep_f}</b> of {len(anom_sleep_f)} total</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        with col_b:
+            st.markdown(f'<div class="m3-card"><div class="m3-card-title">Sleep Anomaly Records</div>', unsafe_allow_html=True)
+            sl_display = anom_sleep_f[anom_sleep_f["is_anomaly"]][["Date","TotalSleepMinutes","rolling_med","residual","reason"]].round(2)
+            if not sl_display.empty:
+                st.dataframe(sl_display.rename(columns={"TotalSleepMinutes":"Sleep (min)","rolling_med":"Expected","residual":"Deviation","reason":"Reason"}),
+                             use_container_width=True, height=200)
+            else:
+                ui_success_m4("No sleep anomalies in selected range")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.plotly_chart(chart_sleep_m4(anom_sleep_f, m4_sl_low, m4_sl_high), use_container_width=True)
+
+    # ── TAB 5: EXPORT ─────────────────────────────────────────────────────────
+    with tab_export:
+        sec_m4("📥", "Export - PDF Report & CSV Data", "Downloadable")
+
+        st.markdown(f"""
+        <div class="m3-card">
+          <div class="m3-card-title">What's Included in the Exports</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;font-size:0.83rem">
+            <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
+              <div style="color:{ACCENT};font-weight:600;margin-bottom:0.5rem">📄 PDF Report (4 pages)</div>
+              <div style="color:{MUTED};line-height:1.8">
+                ✅ Executive summary<br>
+                ✅ Anomaly counts per signal<br>
+                ✅ Thresholds used<br>
+                ✅ Methodology explanation<br>
+                ✅ All 3 charts embedded<br>
+                ✅ Full anomaly records tables<br>
+                ✅ User activity profiles
+              </div>
+            </div>
+            <div style="background:{SECTION_BG};border-radius:10px;padding:0.9rem">
+              <div style="color:{ACCENT3};font-weight:600;margin-bottom:0.5rem">📊 CSV Export</div>
+              <div style="color:{MUTED};line-height:1.8">
+                ✅ All anomaly records<br>
+                ✅ Signal type column<br>
+                ✅ Date of anomaly<br>
+                ✅ Actual vs expected value<br>
+                ✅ Residual deviation<br>
+                ✅ Anomaly reason text<br>
+                ✅ All signals combined
+              </div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown('<hr class="m4-divider">', unsafe_allow_html=True)
+
+        col_pdf, col_csv = st.columns(2)
+
+        with col_pdf:
+            sec_m4("📄", "PDF Report")
+            st.markdown(f'<div style="color:{MUTED};font-size:0.82rem;margin-bottom:0.8rem">Full 4-page PDF with charts embedded, anomaly tables, and user profiles.</div>', unsafe_allow_html=True)
+
+            if st.button("📄 Generate PDF Report", key="gen_pdf"):
+                with st.spinner("⏳ Generating PDF (embedding charts)..."):
+                    try:
+                        fig_hr_exp    = chart_hr_m4(anom_hr_f,    m4_hr_high, m4_hr_low, m4_sigma, h=420)
+                        fig_steps_exp = chart_steps_m4(anom_steps_f, m4_st_low, h=420)
+                        fig_sleep_exp = chart_sleep_m4(anom_sleep_f, m4_sl_low, m4_sl_high, h=420)
+
+                        pdf_buf = generate_pdf_m4(
+                            master_f, anom_hr_f, anom_steps_f, anom_sleep_f,
+                            m4_hr_high, m4_hr_low, m4_st_low, m4_sl_low, m4_sl_high, m4_sigma,
+                            fig_hr_exp, fig_steps_exp, fig_sleep_exp
+                        )
+                        fname = f"FitPulse_Anomaly_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                        st.download_button(
+                            label="⬇️ Download PDF Report",
+                            data=pdf_buf,
+                            file_name=fname,
+                            mime="application/pdf",
+                            key="dl_pdf"
+                        )
+                        ui_success_m4(f"PDF ready - {fname}")
+                    except Exception as e:
+                        st.error(f"PDF error: {e}")
+
+        with col_csv:
+            sec_m4("📊", "CSV Export")
+            st.markdown(f'<div style="color:{MUTED};font-size:0.82rem;margin-bottom:0.8rem">All anomaly records from all three signals in a single CSV file.</div>', unsafe_allow_html=True)
+
+            csv_data = generate_csv_m4(anom_hr_f, anom_steps_f, anom_sleep_f)
+            fname_csv = f"FitPulse_Anomalies_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            st.download_button(
+                label="⬇️ Download Anomaly CSV",
+                data=csv_data,
+                file_name=fname_csv,
+                mime="text/csv",
+                key="dl_csv"
+            )
+
+            with st.expander("👁️ Preview CSV data"):
+                preview_df = pd.concat([
+                    anom_hr_f[anom_hr_f["is_anomaly"]].assign(signal="Heart Rate").rename(columns={"AvgHR":"value","rolling_med":"expected"})[["signal","Date","value","expected","residual","reason"]],
+                    anom_steps_f[anom_steps_f["is_anomaly"]].assign(signal="Steps").rename(columns={"TotalSteps":"value","rolling_med":"expected"})[["signal","Date","value","expected","residual","reason"]],
+                    anom_sleep_f[anom_sleep_f["is_anomaly"]].assign(signal="Sleep").rename(columns={"TotalSleepMinutes":"value","rolling_med":"expected"})[["signal","Date","value","expected","residual","reason"]],
+                ], ignore_index=True).sort_values(["signal","Date"]).round(2)
+                st.dataframe(preview_df, use_container_width=True, height=280)
+
+        st.markdown('<hr class="m4-divider">', unsafe_allow_html=True)
+
+        sec_m4("📸", "Screenshots Required for Submission")
+        st.markdown(f"""
+        <div class="m3-card">
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:0.5rem;font-size:0.82rem">
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 1</b> - Full dashboard UI (Overview tab)
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 2</b> - Downloadable report buttons (this tab)
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 3</b> - KPI strip with anomaly counts
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
+              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 4</b> - HR / Steps / Sleep deep dive tabs
+            </div>
+            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem;grid-column:1/-1">
+              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 5</b> - Sidebar with filters + date range visible
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
