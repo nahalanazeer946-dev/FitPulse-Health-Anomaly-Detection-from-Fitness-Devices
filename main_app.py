@@ -1874,7 +1874,7 @@ elif milestone == "3 — Anomaly Detection & Visualization":
         st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
         sec_m3("❤️", "Heart Rate — Anomaly Chart", "Step 2")
         anom_tag_m3(f"{n_hr} anomalous days detected")
-        screenshot_badge_m3("Heart Rate Chart with Anomaly Highlights")
+
         step_pill_m3(2, "Threshold + Residual Detection")
         ui_info_m3(f"Red markers = anomaly days. Dashed lines = thresholds (HR>{hr_high} or HR<{hr_low}). Shaded band = ±{sigma:.0f}σ residual zone.")
 
@@ -1951,7 +1951,7 @@ elif milestone == "3 — Anomaly Detection & Visualization":
         st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
         sec_m3("💤", "Sleep Pattern — Anomaly Visualization", "Step 3")
         anom_tag_m3(f"{n_sleep} anomalous sleep days detected")
-        screenshot_badge_m3("Sleep Pattern Visualization with Alerts")
+
         step_pill_m3(3, "Threshold Detection on Sleep Minutes")
         ui_info_m3(f"Orange = insufficient sleep (<{sl_low} min). Purple dots = anomaly days. Green band = healthy sleep zone ({sl_low}–{sl_high} min).")
 
@@ -2030,7 +2030,7 @@ elif milestone == "3 — Anomaly Detection & Visualization":
         st.markdown('<hr class="m3-divider">', unsafe_allow_html=True)
         sec_m3("🚶", "Step Count Trend — Alerts & Anomalies", "Step 4")
         anom_tag_m3(f"{n_steps} anomalous step-count days detected")
-        screenshot_badge_m3("Step Count Trend with Alert Bands")
+
         step_pill_m3(4, "Threshold + Residual Detection on Steps")
         ui_info_m3(f"Red vertical bands = anomaly alert days. Dashed lines = step thresholds. Bar chart below shows daily deviation from trend.")
 
@@ -2291,29 +2291,7 @@ elif milestone == "3 — Anomaly Detection & Visualization":
             </div>
             """, unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(f"""
-        <div class="m3-card" style="border-color:{DANGER_BOR}">
-          <div class="m3-card-title">📸 Screenshots Required for Submission</div>
-          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:0.5rem;font-size:0.82rem">
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Chart 1</b> — Heart Rate with anomalies highlighted
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Chart 2</b> — Sleep pattern visualization
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Chart 3</b> — Step count trend with alerts
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Chart 4</b> — DBSCAN outlier scatter (PCA)
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem;grid-column:1/-1">
-              <span style="color:{ACCENT2}">📸</span> <b>Chart 5</b> — Accuracy bar chart (90%+ target line)
-            </div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+
 
 
 # ===================================================
@@ -2708,27 +2686,3 @@ else:
                     anom_sleep_f[anom_sleep_f["is_anomaly"]].assign(signal="Sleep").rename(columns={"TotalSleepMinutes":"value","rolling_med":"expected"})[["signal","Date","value","expected","residual","reason"]],
                 ], ignore_index=True).sort_values(["signal","Date"]).round(2)
                 st.dataframe(preview_df, use_container_width=True, height=280)
-
-        st.markdown('<hr class="m4-divider">', unsafe_allow_html=True)
-
-        sec_m4("📸", "Screenshots Required for Submission")
-        st.markdown(f"""
-        <div class="m3-card">
-          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:0.5rem;font-size:0.82rem">
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 1</b> - Full dashboard UI (Overview tab)
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 2</b> - Downloadable report buttons (this tab)
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 3</b> - KPI strip with anomaly counts
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem">
-              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 4</b> - HR / Steps / Sleep deep dive tabs
-            </div>
-            <div style="background:{SECTION_BG};border-radius:8px;padding:0.6rem 0.8rem;grid-column:1/-1">
-              <span style="color:{ACCENT2}">📸</span> <b>Screenshot 5</b> - Sidebar with filters + date range visible
-            </div>
-          </div>
-        </div>""", unsafe_allow_html=True)
